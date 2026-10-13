@@ -1,0 +1,48 @@
+// Copyright 2021 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include "sharing/service/scheduling/nearby_share_periodic_scheduler.h"
+
+#include <algorithm>
+#include <utility>
+
+#include "absl/strings/string_view.h"
+#include "absl/time/time.h"
+#include "sharing/api/api/preference_manager.h"
+#include "sharing/api/public/context.h"
+#include "sharing/service/scheduling/nearby_share_scheduler.h"
+#include "sharing/service/scheduling/nearby_share_scheduler_base.h"
+
+namespace quickshare::sharing {
+using ::quickshare::sharing::api::PreferenceManager;
+
+NearbySharePeriodicScheduler::NearbySharePeriodicScheduler(
+    Context* context, PreferenceManager& preference_manager,
+    absl::Duration request_period, bool retry_failures,
+    bool require_connectivity, absl::string_view pref_name,
+    OnRequestCallback callback)
+    : NearbyShareSchedulerBase(context, preference_manager, retry_failures,
+                               require_connectivity, pref_name,
+                               std::move(callback)),
+      request_period_(request_period) {}
+
+NearbySharePeriodicScheduler::~NearbySharePeriodicScheduler() = default;
+
+absl::Duration
+NearbySharePeriodicScheduler::TimeUntilRecurringRequest(absl::Time now) const {
+  return std::max(absl::ZeroDuration(),
+                  request_period_ - (now - GetLastSuccessTime()));
+}
+
+}  // namespace quickshare::sharing

@@ -1,0 +1,113 @@
+// Copyright 2023 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include "sharing/service/nearby_sharing_util.h"
+
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <vector>
+
+#include "absl/hash/hash.h"
+#include "absl/strings/escaping.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
+#include "proto/sharing/sharing_enums.pb.h"
+#include "sharing/domain/advertisement.h"
+#include "sharing/domain/certificates/nearby_share_decrypted_public_certificate.h"
+#include "sharing/api/common/nearby_share_enums.h"
+#include "sharing/api/base/encode.h"
+#include "sharing/api/public/logging.h"
+
+namespace quickshare::sharing {
+
+std::string PowerLevelToString(PowerLevel level) {
+  switch (level) {
+    case PowerLevel::kLowPower:
+      return "LOW_POWER";
+    case PowerLevel::kMediumPower:
+      return "MEDIUM_POWER";
+    case PowerLevel::kHighPower:
+      return "HIGH_POWER";
+    case PowerLevel::kUnknown:
+      return "UNKNOWN";
+  }
+}
+
+std::optional<std::vector<uint8_t>> GetBluetoothMacAddressFromCertificate(
+    const NearbyShareDecryptedPublicCertificate& certificate) {
+  if (!certificate.unencrypted_metadata().has_bluetooth_mac_address()) {
+    LOG(WARNING) << __func__ << ": Public certificate "
+                 << utils::HexEncode(certificate.id())
+                 << " did not contain a Bluetooth mac address.";
+    return std::nullopt;
+  }
+
+  std::string mac_address =
+      certificate.unencrypted_metadata().bluetooth_mac_address();
+  if (mac_address.size() != 6) {
+    LOG(ERROR) << __func__ << ": Invalid bluetooth mac address: '"
+               << mac_address << "'";
+    return std::nullopt;
+  }
+
+  return std::vector<uint8_t>(mac_address.begin(), mac_address.end());
+}
+
+std::optional<std::string> GetDeviceName(
+    const Advertisement& advertisement,
+    const std::optional<NearbyShareDecryptedPublicCertificate>& certificate) {
+
+  // Device name is always included when visible to everyone.
+  if (advertisement.device_name().has_value()) {
+    return advertisement.device_name();
+  }
+
+  // For contacts only advertisements, we can't do anything without the
+  // certificate.
+  if (!certificate.has_value() ||
+      !certificate->unencrypted_metadata().has_device_name()) {
+    return std::nullopt;
+  }
+
+  return certificate->unencrypted_metadata().device_name();
+}
+
+// Return the most stable device identifier with the following priority:
+//   1. Hash of Bluetooth MAC address.
+//   2. Certificate ID.
+//   3. Endpoint ID.
+std::string GetDeviceId(
+    absl::string_view endpoint_id,
+    const std::optional<NearbyShareDecryptedPublicCertificate>& certificate) {
+  if (!certificate.has_value()) {
+    return std::string(endpoint_id);
+  }
+
+  std::optional<std::vector<uint8_t>> mac_address =
+      GetBluetoothMacAddressFromCertificate(*certificate);
+  if (mac_address.has_value()) {
+    return absl::StrCat(absl::Hash<std::vector<uint8_t>>{}(*mac_address));
+  }
+
+  if (!certificate->id().empty()) {
+    return absl::BytesToHexString(absl::string_view(
+        reinterpret_cast<const char*>(certificate->id().data()),
+        certificate->id().size()));
+  }
+
+  return std::string(endpoint_id);
+}
+
+}  // namespace quickshare::sharing

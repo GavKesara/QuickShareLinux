@@ -1,0 +1,143 @@
+// Copyright 2024 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Mendel flags, auto-generated. DO NOT EDIT.
+#ifndef THIRD_PARTY_NEARBY_SHARING_FLAGS_NEARBY_SHARING_FEATURE_FLAGS_H_
+#define THIRD_PARTY_NEARBY_SHARING_FLAGS_NEARBY_SHARING_FEATURE_FLAGS_H_
+
+#include <cstdint>
+
+#include "absl/container/btree_map.h"
+#include "absl/strings/string_view.h"
+#include "base/flags/flag.h"
+
+namespace quickshare::sharing {
+namespace config_package_nearby {
+
+constexpr absl::string_view kConfigPackage = "nearby";
+
+namespace nearby_sharing_feature {
+// Time to delay the endpoint loss in milliseconds.
+constexpr auto kDelayEndpointLossMs =
+    base::flags::Flag<int64_t>(kConfigPackage, "45632386", 500);
+// Enable/disable the use of BLE as a connection medium.
+constexpr auto kEnableBleForTransfer =
+    base::flags::Flag<bool>(kConfigPackage, "45427466", false);
+// Enable/disable certificates dump
+constexpr auto kEnableCertificatesDump =
+    base::flags::Flag<bool>(kConfigPackage, "45409184", false);
+// Enable/disable WifiLan medium in Nearby Share
+constexpr auto kEnableMediumWifiLan =
+    base::flags::Flag<bool>(kConfigPackage, "45418906", true);
+// Enable/disable retry/resume transfer for partial files.
+constexpr auto kEnableRetryResumeTransfer =
+    base::flags::Flag<bool>(kConfigPackage, "45411589", false);
+// Enable/disable sending desktop events
+constexpr auto kEnableSendingDesktopEvents =
+    base::flags::Flag<bool>(kConfigPackage, "45459748", false);
+// Set the logging level in Nearby Sharing SDK. The default logging level is
+// WARNING. The mapping of logging level to number: INFO: 0, WARNING: 1, ERROR:
+// 2, FATAL: 3,  negative values are -(verbosity level).
+constexpr auto kLoggingLevel =
+    base::flags::Flag<int64_t>(kConfigPackage, "45401358", 1);
+// Enable/disable auto-update on settings page
+constexpr auto kShowAutoUpdateSetting =
+    base::flags::Flag<bool>(kConfigPackage, "45409033", false);
+// The default time in milliseconds a cached entry can be in LOST state.
+constexpr auto kDiscoveryCacheLostExpiryMs =
+    base::flags::Flag<int64_t>(kConfigPackage, "45658774", 15000);
+// When true, enable suspend resume listener.
+constexpr auto kEnableSuspendResumeListener =
+    base::flags::Flag<bool>(kConfigPackage, "45815625", false);
+// When true, enable wifi hotspot medium for HP Realtek devices.
+constexpr auto kEnableWifiHotspotForHpRealtekDevices =
+    base::flags::Flag<bool>(kConfigPackage, "45673628", false);
+// The amount of time in milliseconds a share target stays in discovery cache in
+// receive disabled state after a transfer.
+constexpr auto kUnregisterTargetDiscoveryCacheLostExpiryMs =
+    base::flags::Flag<int64_t>(kConfigPackage, "45663103", 10000);
+// When true, enable alternate BLE service UUID for discovery.
+constexpr auto kUseAlternateServiceUuidForDiscovery =
+    base::flags::Flag<bool>(kConfigPackage, "45683539", false);
+// Update track
+constexpr auto kUpdateTrack =
+    base::flags::Flag<absl::string_view>(kConfigPackage, "45409861", "");
+// Timeout between displays of the conflict banner.
+constexpr auto kConflictBannerTimeout =
+    base::flags::Flag<int64_t>(kConfigPackage, "45668886", 604800);
+// When true, enables the backup feature.
+constexpr auto kEnableBackup =
+    base::flags::Flag<bool>(kConfigPackage, "45776229", false);
+// Enable a persistent BETA label.
+constexpr auto kEnableBetaLabel =
+    base::flags::Flag<bool>(kConfigPackage, "45662570", true);
+// Enable the info banner to display duplicate Quick Share apps.
+constexpr auto kEnableConflictBanner =
+    base::flags::Flag<bool>(kConfigPackage, "45661130", true);
+// When true, enables use of Flutter hooks.
+constexpr auto kEnableFlutterHooks =
+    base::flags::Flag<bool>(kConfigPackage, "45720206", false);
+// When true, enables the mini pulse animation.
+constexpr auto kEnableMiniPulse =
+    base::flags::Flag<bool>(kConfigPackage, "45724244", false);
+// When true, enables notifications implemented in native code.
+constexpr auto kEnableNativeNotifications =
+    base::flags::Flag<bool>(kConfigPackage, "45743135", false);
+
+inline absl::btree_map<int, const base::flags::Flag<bool>&> GetBoolFlags() {
+  return {
+      {45427466, kEnableBleForTransfer},
+      {45409184, kEnableCertificatesDump},
+      {45418906, kEnableMediumWifiLan},
+      {45411589, kEnableRetryResumeTransfer},
+      {45459748, kEnableSendingDesktopEvents},
+      {45409033, kShowAutoUpdateSetting},
+      {45815625, kEnableSuspendResumeListener},
+      {45673628, kEnableWifiHotspotForHpRealtekDevices},
+      {45683539, kUseAlternateServiceUuidForDiscovery},
+      {45776229, kEnableBackup},
+      {45662570, kEnableBetaLabel},
+      {45661130, kEnableConflictBanner},
+      {45720206, kEnableFlutterHooks},
+      {45724244, kEnableMiniPulse},
+      {45743135, kEnableNativeNotifications},
+  };
+}
+
+inline absl::btree_map<int, const base::flags::Flag<int64_t>&> GetInt64Flags() {
+  return {
+      {45632386, kDelayEndpointLossMs},
+      {45401358, kLoggingLevel},
+      {45658774, kDiscoveryCacheLostExpiryMs},
+      {45663103, kUnregisterTargetDiscoveryCacheLostExpiryMs},
+      {45668886, kConflictBannerTimeout},
+  };
+}
+
+inline absl::btree_map<int, const base::flags::Flag<double>&> GetDoubleFlags() {
+  return {};
+}
+
+inline absl::btree_map<int, const base::flags::Flag<absl::string_view>&>
+GetStringFlags() {
+  return {
+      {45409861, kUpdateTrack},
+  };
+}
+
+}  // namespace nearby_sharing_feature
+}  // namespace config_package_nearby
+}  // namespace quickshare::sharing
+
+#endif  // THIRD_PARTY_NEARBY_SHARING_FLAGS_NEARBY_SHARING_FEATURE_FLAGS_H_

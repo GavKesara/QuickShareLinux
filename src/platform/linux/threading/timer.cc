@@ -1,0 +1,126 @@
+// Copyright 2021 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include <bits/types/struct_itimerspec.h>
+#include <signal.h>
+#include <time.h>
+#include <cerrno>
+#include <cstring>
+#include <ctime>
+
+#include "absl/synchronization/mutex.h"
+#include "platform/linux/threading/timer.h"
+#include "platform/api/logging.h"
+
+namespace quickshare::platform {
+namespace linux {
+
+namespace {
+
+timespec MillisToTimespec(int milliseconds) {
+  if (milliseconds < 0) {
+    milliseconds = 0;
+  }
+
+  timespec ts{};
+  ts.tv_sec = milliseconds / 1000;
+  ts.tv_nsec = static_cast<long>(milliseconds % 1000) * 1000000L;
+  return ts;
+}
+
+}  // namespace
+
+static void timer_callback(union sigval val) {
+  absl::AnyInvocable<void()> *callback =
+      reinterpret_cast<absl::AnyInvocable<void()> *>(val.sival_ptr);
+  if (*callback != nullptr) (*callback)();
+}
+
+Timer::~Timer() { Stop(); }
+
+bool Timer::Create(int delay, int interval,
+                   absl::AnyInvocable<void()> callback) {
+  if (delay < 0 || interval < 0) {
+    LOG(ERROR) << __func__
+                       << ": Delay and interval cannot be negative.";
+    return false;
+  }
+
+  absl::MutexLock l(&mutex_);
+  if (timerid_.has_value()) {
+    if (timer_delete(*timerid_) < 0) {
+      if (errno != EINVAL) {
+        LOG(ERROR) << __func__ << ": Error deleting stale POSIX timer: "
+                   << std::strerror(errno);
+        return false;
+      }
+    }
+    timerid_.reset();
+  }
+
+  callback_ = std::move(callback);
+
+  struct sigevent ev{};
+  ev.sigev_notify = SIGEV_THREAD;
+  ev.sigev_value.sival_ptr = &callback_;
+  ev.sigev_notify_function = timer_callback;
+  ev.sigev_notify_attributes = nullptr;
+
+  timer_t timerid;
+
+  struct itimerspec spec{};
+  spec.it_value = MillisToTimespec(delay);
+  spec.it_interval = MillisToTimespec(interval);
+
+  if (timer_create(CLOCK_MONOTONIC, &ev, &timerid) < 0) {
+    LOG(ERROR) << __func__ << ": Error creating POSIX timer: "
+                       << std::strerror(errno);
+    return false;
+  }
+
+  if (timer_settime(timerid, 0, &spec, nullptr) < 0) {
+    LOG(ERROR) << __func__ << ": Error arming POSIX timer: "
+                       << std::strerror(errno);
+    if (timer_delete(timerid) < 0) {
+      LOG(ERROR) << __func__ << ": error deleting POSIX timer: "
+                         << std::strerror(errno);
+    }
+    return false;
+  }
+
+  timerid_ = timerid;
+  return true;
+}
+
+bool Timer::Stop() {
+  absl::MutexLock l(&mutex_);
+  if (!timerid_.has_value()) {
+    return true;
+  }
+
+  if (timer_delete(*timerid_) < 0) {
+    if (errno != EINVAL) {
+      LOG(ERROR) << __func__ << ": error deleting POSIX timer: "
+                 << std::strerror(errno);
+      return false;
+    }
+  }
+
+  timerid_.reset();
+
+  return true;
+}
+
+}  // namespace linux
+}  // namespace quickshare::platform

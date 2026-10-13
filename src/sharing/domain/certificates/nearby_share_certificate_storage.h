@@ -1,0 +1,112 @@
+// Copyright 2022 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#ifndef THIRD_PARTY_NEARBY_SHARING_CERTIFICATES_NEARBY_SHARE_CERTIFICATE_STORAGE_H_
+#define THIRD_PARTY_NEARBY_SHARING_CERTIFICATES_NEARBY_SHARE_CERTIFICATE_STORAGE_H_
+
+#include <functional>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "absl/strings/string_view.h"
+#include "absl/time/time.h"
+#include "absl/types/span.h"
+#include "sharing/domain/certificates/nearby_share_private_certificate.h"
+#include "proto/sharing/enums.pb.h"
+#include "proto/sharing/rpc_resources.pb.h"
+
+namespace quickshare::sharing {
+
+// Stores local-device private certificates and remote-device public
+// certificates. Provides methods to help manage certificate expiration. Due to
+// the potentially large number of public certificates, some methods are
+// asynchronous.
+class NearbyShareCertificateStorage {
+ public:
+  using ResultCallback = std::function<void(bool)>;
+  using PublicCertificateCallback = std::function<void(
+      bool,
+      std::unique_ptr<std::vector<nearby::sharing::proto::PublicCertificate>>)>;
+
+  NearbyShareCertificateStorage() = default;
+  virtual ~NearbyShareCertificateStorage() = default;
+
+  // Returns the secret ids of all stored public certificates
+  virtual std::vector<std::string> GetPublicCertificateIds() const = 0;
+
+  // Returns all public certificates currently in storage. No RPC call is made.
+  virtual void GetPublicCertificates(PublicCertificateCallback callback) = 0;
+
+  // Returns a single public certificate with the given id.
+  virtual void GetPublicCertificate(
+      absl::string_view id,
+      std::function<void(
+          bool, std::unique_ptr<nearby::sharing::proto::PublicCertificate>)>
+          callback) = 0;
+
+  // Returns all valid private certificates currently in storage.
+  virtual std::vector<NearbySharePrivateCertificate>
+  GetPrivateCertificates() = 0;
+
+  // Returns the next time a certificate expires or absl::InfinitePast() if
+  // there are fewer than `min_certs` present.
+  absl::Time NextPrivateCertificateExpirationTime(int min_certs);
+
+  // Returns the time the next public certificate expires or
+  // absl::InfiniteFuture() if there are no public certificates present.
+  virtual absl::Time NextPublicCertificateExpirationTime() const = 0;
+
+  // Deletes existing private certificates and replaces them with
+  // |private_certificates|.
+  virtual void ReplacePrivateCertificates(
+      absl::Span<const NearbySharePrivateCertificate> private_certificates) = 0;
+
+  // Overwrites an existing record with |private_certificate| if that record
+  // has the same ID . If no such record exists in storage, no action is taken.
+  // This method is necessary for updating the private certificate's list of
+  // consumed salts.
+  void UpdatePrivateCertificate(
+      const NearbySharePrivateCertificate& private_certificate);
+
+  // Adds public certificates, or replaces existing certificates
+  // by secret_id
+  virtual void AddPublicCertificates(
+      absl::Span<const nearby::sharing::proto::PublicCertificate>
+          public_certificates,
+      ResultCallback callback) = 0;
+
+  // Removes all private certificates from storage with expiration date after
+  // |now|.
+  void RemoveExpiredPrivateCertificates(absl::Time now);
+
+  // Removes all public certificates from storage with expiration date after
+  // |now|.
+  virtual void RemoveExpiredPublicCertificates(absl::Time now,
+                                               ResultCallback callback) = 0;
+
+  // Delete all private certificates from memory and persistent storage.
+  void ClearPrivateCertificates();
+
+  // Delete private certificates with |visibility| from memory and persistent
+  // storage.
+  void ClearPrivateCertificatesOfVisibility(nearby::sharing::proto::DeviceVisibility visibility);
+
+  // Delete all public certificates from memory and persistent storage.
+  virtual void ClearPublicCertificates(ResultCallback callback) = 0;
+};
+
+}  // namespace quickshare::sharing
+
+#endif  // THIRD_PARTY_NEARBY_SHARING_CERTIFICATES_NEARBY_SHARE_CERTIFICATE_STORAGE_H_

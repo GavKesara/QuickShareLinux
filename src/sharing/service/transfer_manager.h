@@ -1,0 +1,73 @@
+// Copyright 2023 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#ifndef THIRD_PARTY_NEARBY_SHARING_TRANSFER_MANAGER_H_
+#define THIRD_PARTY_NEARBY_SHARING_TRANSFER_MANAGER_H_
+
+#include <memory>
+#include <queue>
+#include <string>
+
+#include "absl/base/nullability.h"
+#include "absl/base/thread_annotations.h"
+#include "absl/functional/any_invocable.h"
+#include "absl/strings/string_view.h"
+#include "absl/synchronization/mutex.h"
+#include "absl/time/time.h"
+#include "platform/api/task_runner.h"
+#include "sharing/domain/nearby_connections_types.h"
+#include "sharing/service/thread_timer.h"
+
+namespace quickshare::sharing {
+
+// TransferManager is used to delay the payload transfer until the medium
+// quality is in high quality. If the quality doesn't change in a duration, it
+// will give up to wait for the medium change.
+class TransferManager {
+ public:
+  // Used to wait for the medium upgrade.
+  static constexpr absl::Duration kMediumUpgradeTimeout = absl::Seconds(10);
+
+  TransferManager(platform::TaskRunner* absl_nonnull runner,
+                  absl::string_view endpoint_id,
+                  absl::AnyInvocable<void(absl::string_view endpoint_id,
+                                          std::unique_ptr<Payload> payload)>
+                      deferred_send_function);
+
+  ~TransferManager();
+
+  void Send(std::unique_ptr<Payload> payload) ABSL_LOCKS_EXCLUDED(mutex_);
+  void OnMediumQualityChanged(Medium current_medium)
+      ABSL_LOCKS_EXCLUDED(mutex_);
+  bool StartTransfer() ABSL_LOCKS_EXCLUDED(mutex_);
+  bool CancelTransfer() ABSL_LOCKS_EXCLUDED(mutex_);
+
+ private:
+  void StopWaitingForHighQualityMedium() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+
+  platform::TaskRunner& runner_;
+  const std::string endpoint_id_;
+  absl::AnyInvocable<void(absl::string_view endpoint_id,
+                            std::unique_ptr<Payload> payload)>
+      deferred_send_function_;
+  absl::Mutex mutex_;
+  bool is_waiting_for_high_quality_medium_ ABSL_GUARDED_BY(mutex_) = true;
+  std::queue<std::unique_ptr<Payload>> pending_payloads_
+      ABSL_GUARDED_BY(mutex_);
+  std::unique_ptr<ThreadTimer> timeout_timer_ ABSL_GUARDED_BY(mutex_) = nullptr;
+};
+
+}  // namespace quickshare::sharing
+
+#endif  // THIRD_PARTY_NEARBY_SHARING_TRANSFER_MANAGER_H_

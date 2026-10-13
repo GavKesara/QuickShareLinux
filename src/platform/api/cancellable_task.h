@@ -1,0 +1,76 @@
+// Copyright 2020 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#ifndef PLATFORM_PUBLIC_CANCELLABLE_TASK_H_
+#define PLATFORM_PUBLIC_CANCELLABLE_TASK_H_
+
+#include <utility>
+
+#include "platform/api/atomic_boolean.h"
+#include "platform/api/feature_flags.h"
+#include "platform/api/future.h"
+#include "platform/api/runnable.h"
+
+namespace quickshare::platform {
+
+/**
+ * Runnable wrapper that allows one to wait for the task
+ * to complete if it is already running.
+ */
+class CancellableTask {
+ public:
+  explicit CancellableTask(Runnable&& runnable)
+      : CancellableTask(std::move(runnable), /*is_repeated=*/false) {}
+
+  explicit CancellableTask(Runnable&& runnable, bool is_repeated_)
+      : is_repeated_{is_repeated_}, runnable_{std::move(runnable)} {}
+
+  /**
+   * Try to cancel the task and wait until completion if the task is already
+   * running.
+   */
+  void CancelAndWaitIfStarted() {
+    if (started_or_cancelled_.Set(true)) {
+      if (FeatureFlags::GetInstance()
+              .GetFlags()
+              .cancel_waits_for_running_tasks) {
+        // task could still be running, wait until finish
+        finished_.Get();
+      }
+    } else {
+      // mark as finished to support multiple calls to this method
+      finished_.Set(true);
+    }
+  }
+
+  void operator()() {
+    if (started_or_cancelled_.Set(true)) return;
+    finished_ = Future<bool>();
+    runnable_();
+    finished_.Set(true);
+    if (is_repeated_) {
+      started_or_cancelled_.Set(false);
+    }
+  }
+
+ private:
+  const bool is_repeated_;
+  AtomicBoolean started_or_cancelled_{false};
+  Future<bool> finished_;
+  Runnable runnable_;
+};
+
+}  // namespace quickshare::platform
+
+#endif  // PLATFORM_PUBLIC_CANCELLABLE_TASK_H_

@@ -1,0 +1,18 @@
+<!DOCTYPE RCC><RCC version="1.0">
+<qresource prefix="/">
+    <file alias="main.qml">qml/main.qml</file>
+    <file alias="qmldir">qml/qmldir</file>
+    <file alias="AppContent.qml">qml/AppContent.qml</file>
+    <file alias="Theme.qml">qml/Theme.qml</file>
+    <file alias="AppButton.qml">qml/AppButton.qml</file>
+    <file alias="AppSwitch.qml">qml/AppSwitch.qml</file>
+    <file alias="RippleAvatar.qml">qml/RippleAvatar.qml</file>
+    <file alias="FileList.qml">qml/FileList.qml</file>
+    <file alias="DeviceCard.qml">qml/DeviceCard.qml</file>
+    <file alias="IncomingDialog.qml">qml/IncomingDialog.qml</file>
+    <file alias="TransferCard.qml">qml/TransferCard.qml</file>
+    <file alias="IssueBanner.qml">qml/IssueBanner.qml</file>
+    <file alias="TroubleshootDialog.qml">qml/TroubleshootDialog.qml</file>
+    <file alias="icons/quickshare.svg">icons/quickshare.svg</file>
+</qresource>
+</RCC>

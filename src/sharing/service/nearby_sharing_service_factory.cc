@@ -1,0 +1,72 @@
+// Copyright 2022 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include "sharing/service/nearby_sharing_service_factory.h"
+
+#include <memory>
+#include <utility>
+
+#include "sharing/stubs/location/nearby/analytics/cpp/logging/event_logger.h"
+#include "sharing/stubs/location/nearby/sharing/lib/rpc/grpc_async_client_factory.h"
+#include "platform/api/task_runner.h"
+#include "sharing/service/analytics/analytics_recorder.h"
+#include "sharing/api/api/sharing_platform.h"
+#include "sharing/api/public/context_impl.h"
+#include "sharing/service/nearby_connections_manager_factory.h"
+#include "sharing/service/nearby_sharing_service.h"
+#include "sharing/service/nearby_sharing_service_impl.h"
+
+namespace quickshare::sharing {
+
+using ::quickshare::sharing::api::SharingPlatform;
+
+NearbySharingServiceFactory* NearbySharingServiceFactory::GetInstance() {
+  static NearbySharingServiceFactory* instance =
+      new NearbySharingServiceFactory();
+  return instance;
+}
+
+NearbySharingService* NearbySharingServiceFactory::CreateSharingService(
+    SharingPlatform& sharing_platform,
+    analytics::AnalyticsRecorder* analytics_recorder,
+    ::quickshare::sharing::stubs::analytics::EventLogger* event_logger, bool supports_file_sync) {
+  if (nearby_sharing_service_ != nullptr) {
+    return nullptr;
+  }
+
+  context_ =
+      std::make_unique<ContextImpl>(sharing_platform);
+  std::unique_ptr<platform::TaskRunner> service_thread =
+      context_->CreateSequencedTaskRunner();
+  auto nearby_connections_manager =
+      NearbyConnectionsManagerFactory::CreateConnectionsManager(
+          service_thread.get(), context_.get(),
+          sharing_platform.GetDeviceInfo(), event_logger);
+
+  nearby_share_client_factory_ =
+      std::make_unique<stubs::platform::common::GrpcAsyncClientFactory>(
+          &sharing_platform.GetAccountManager(), context_->GetClock(),
+          analytics_recorder);
+  nearby_identity_client_ =
+      nearby_share_client_factory_->CreateIdentityInstance();
+
+  nearby_sharing_service_ = std::make_unique<NearbySharingServiceImpl>(
+      std::move(service_thread), context_.get(), sharing_platform,
+      nearby_identity_client_.get(), std::move(nearby_connections_manager),
+      analytics_recorder, supports_file_sync);
+
+  return nearby_sharing_service_.get();
+}
+
+}  // namespace quickshare::sharing

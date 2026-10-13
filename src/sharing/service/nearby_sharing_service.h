@@ -1,0 +1,239 @@
+// Copyright 2022 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#ifndef THIRD_PARTY_NEARBY_SHARING_NEARBY_SHARING_SERVICE_H_
+#define THIRD_PARTY_NEARBY_SHARING_NEARBY_SHARING_SERVICE_H_
+
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <string>
+
+#include "sharing/stubs/location/nearby/sharing/lib/sync/sync_manager.h"
+#include "absl/functional/any_invocable.h"
+#include "absl/strings/string_view.h"
+#include "absl/time/time.h"
+#include "platform/api/clock.h"
+#include "sharing/domain/advertisement.h"
+#include "sharing/domain/attachment_container.h"
+#include "sharing/domain/certificates/nearby_share_certificate_manager.h"
+#include "sharing/service/nearby_sharing_settings.h"
+#include "sharing/service/outgoing_targets_manager.h"
+#include "sharing/service/share_target_discovered_callback.h"
+#include "sharing/service/transfer_update_callback.h"
+
+namespace quickshare::sharing {
+
+namespace stubs { class AccountManager; }
+class NearbyNotificationDelegate;
+
+// This service implements Nearby Sharing on top of the Nearby Connections mojo.
+// Currently, only single profile will be allowed to be bound at a time and only
+// after the user has enabled Nearby Sharing in prefs.
+class NearbySharingService {
+ public:
+  // These values are persisted to logs. Entries should not be renumbered and
+  // numeric values should never be reused. If entries are added, kMaxValue
+  // should be updated.
+  enum class StatusCodes {
+    // The operation was successful.
+    kOk = 0,
+    // The operation failed, without any more information.
+    kError = 1,
+    // The operation failed since it was called in an invalid order.
+    kOutOfOrderApiCall = 2,
+    // Tried to stop something that was already stopped.
+    kStatusAlreadyStopped = 3,
+    // Tried to register an opposite foreground surface in the midst of a
+    // transfer or connection.
+    // (Tried to register Send Surface when receiving a file or tried to
+    // register Receive Surface when
+    // sending a file.)
+    kTransferAlreadyInProgress = 4,
+    // There is no available connection medium to use.
+    kNoAvailableConnectionMedium = 5,
+    // Bluetooth or WiFi hardware ran into an irrecoverable state. User PC needs
+    // to be restarted.
+    kIrrecoverableHardwareError = 6,
+    // Method argument is invalid.
+    // TODO(b/341292610): update dart side to use kInvalidArgument.
+    kInvalidArgument = 7,
+    kMaxValue = kInvalidArgument
+  };
+
+  enum class ReceiveSurfaceState {
+    // Default, invalid state.
+    kUnknown,
+    // Background receive surface advertises only to contacts.
+    kBackground,
+    // Foreground receive surface advertises to everyone.
+    kForeground,
+  };
+
+  enum class SendSurfaceState {
+    // Default, invalid state.
+    kUnknown,
+    // Background send surface only listens to transfer update.
+    kBackground,
+    // Foreground send surface both scans and listens to transfer update.
+    kForeground,
+  };
+
+  class Observer {
+   public:
+    enum class AdapterState {
+      INVALID = 0,
+      NOT_PRESENT = 1,
+      DISABLED = 2,
+      ENABLED = 3,
+    };
+
+    virtual ~Observer() = default;
+    virtual void OnHighVisibilityChangeRequested() {}
+    virtual void OnHighVisibilityChanged(bool in_high_visibility) = 0;
+
+    virtual void OnStartAdvertisingFailure() {}
+    virtual void OnStartDiscoveryResult(bool success) {}
+
+    virtual void OnBluetoothStatusChanged(AdapterState state) {}
+    virtual void OnLanStatusChanged(AdapterState state) {}
+    virtual void OnIrrecoverableHardwareErrorReported() {}
+
+    virtual void OnCredentialError() {}
+  };
+
+  static std::string StatusCodeToString(StatusCodes status_code);
+
+  virtual ~NearbySharingService() = default;
+
+  virtual void AddObserver(Observer* observer) = 0;
+  virtual void RemoveObserver(Observer* observer) = 0;
+
+  // Shutdown the Nearby Sharing service, and cleanup.
+  virtual void Shutdown(
+      std::function<void(StatusCodes)> status_codes_callback) = 0;
+
+  // Registers a send surface for handling payload transfer status and device
+  // discovery, with optional blocking on a specified vendor ID.
+  // `transfer_callback` is used as the main identity for the surface, so trying
+  // to re-register the same transfer callback with a different
+  // `discovery_callback` will result in an error delivered via the status
+  // callback.
+  // If `disable_wifi_hotspot` true, disables use of Wifi Hotspot for transfer
+  // if the device is currently already connected to Wifi.  This prevents
+  // interruption of connectivity on the device during transfers. If there are
+  // multiple ongoing requests, any requests with `disable_wifi_hotspot` set to
+  // true will disable use of Wifi Hotspot for the device.
+  virtual void RegisterSendSurface(
+      TransferUpdateCallback* transfer_callback,
+      ShareTargetDiscoveredCallback* discovery_callback, SendSurfaceState state,
+      Advertisement::BlockedVendorId blocked_vendor_id,
+      bool disable_wifi_hotspot,
+      absl::AnyInvocable<void(StatusCodes)> status_codes_callback) = 0;
+
+  // Unregisters the current send surface.
+  virtual void UnregisterSendSurface(
+      TransferUpdateCallback* transfer_callback,
+      absl::AnyInvocable<void(StatusCodes)> status_codes_callback) = 0;
+
+  // Registers a receiver surface for handling payload transfer status, and
+  // advertises the vendor ID specified by |vendor_id|.
+  virtual void RegisterReceiveSurface(
+      TransferUpdateCallback* transfer_callback, ReceiveSurfaceState state,
+      Advertisement::BlockedVendorId vendor_id,
+      absl::AnyInvocable<void(StatusCodes)> status_codes_callback) = 0;
+
+  // Unregisters the current receive surface.
+  virtual void UnregisterReceiveSurface(
+      TransferUpdateCallback* transfer_callback,
+      absl::AnyInvocable<void(StatusCodes)> status_codes_callback) = 0;
+
+  // Unregisters all foreground receive surfaces.
+  virtual void ClearForegroundReceiveSurfaces(
+      absl::AnyInvocable<void(StatusCodes)> status_codes_callback) = 0;
+
+  // Returns true if there is an ongoing file transfer.
+  virtual bool IsTransferring() const = 0;
+
+  // Returns true if we are currently scanning for remote devices.
+  virtual bool IsScanning() const = 0;
+
+  // Returns true if the bluetooth adapter is present.
+  virtual bool IsBluetoothPresent() const = 0;
+
+  // Returns true if the bluetooth adapter is powered.
+  virtual bool IsBluetoothPowered() const = 0;
+
+  // Returns true if extended advertising is supported by the BLE adapter
+  virtual bool IsExtendedAdvertisingSupported() const = 0;
+
+  // Returns true if the PC is connected to LAN (wifi/ethernet).
+  virtual bool IsLanConnected() const = 0;
+
+  // Returns the QR Code Url.
+  virtual std::string GetQrCodeUrl() const = 0;
+
+  // Sends |attachments| to the remote |share_target|.
+  virtual void SendAttachments(
+      int64_t share_target_id,
+      std::unique_ptr<AttachmentContainer> attachment_container,
+      std::function<void(StatusCodes)> status_codes_callback) = 0;
+
+  // Accepts incoming share from the remote |share_target|.
+  virtual void Accept(
+      int64_t share_target_id,
+      std::function<void(StatusCodes status_codes)> status_codes_callback) = 0;
+
+  // Rejects incoming share from the remote |share_target|.
+  virtual void Reject(
+      int64_t share_target_id,
+      std::function<void(StatusCodes status_codes)> status_codes_callback) = 0;
+
+  // Cancels outgoing shares to the remote |share_target|.
+  virtual void Cancel(
+      int64_t share_target_id,
+      std::function<void(StatusCodes status_codes)> status_codes_callback) = 0;
+
+  virtual void InitiatePairing(
+      int64_t share_target_id,
+      nearby::sharing::service::proto::BindingRequest::Type binding_type,
+      absl::AnyInvocable<void(StatusCodes status_codes) &&>
+          status_codes_callback) = 0;
+
+  // Checks to make sure visibility setting is valid and updates the service's
+  // visibility if so.
+  virtual void SetVisibility(
+      nearby::sharing::proto::DeviceVisibility visibility, absl::Duration expiration,
+      absl::AnyInvocable<void(StatusCodes status_code) &&> callback) = 0;
+
+  virtual std::string Dump() const = 0;
+  virtual void UpdateFilePathsInProgress(bool update_file_paths) = 0;
+
+  virtual NearbyShareSettings* GetSettings() = 0;
+  virtual NearbyShareCertificateManager* GetCertificateManager() = 0;
+  virtual stubs::AccountManager* GetAccountManager() = 0;
+  virtual platform::Clock& GetClock() = 0;
+  virtual void SetAlternateServiceUuidForDiscovery(
+      uint16_t alternate_service_uuid) = 0;
+  virtual stubs::SyncManager& sync_manager() = 0;
+  virtual OutgoingTargetsManager& outgoing_targets_manager() = 0;
+  virtual void UpdateBackupSavePath(
+      absl::string_view binding_id, absl::string_view save_path,
+      absl::AnyInvocable<void(NearbySharingService::StatusCodes)>
+          status_codes_callback) = 0;
+};
+
+}  // namespace quickshare::sharing
+
+#endif  // THIRD_PARTY_NEARBY_SHARING_NEARBY_SHARING_SERVICE_H_

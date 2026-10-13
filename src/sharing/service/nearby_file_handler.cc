@@ -1,0 +1,94 @@
+// Copyright 2022 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include "sharing/service/nearby_file_handler.h"
+
+#include <stdint.h>
+#include <functional>
+#include <memory>
+#include <optional>
+#include <utility>
+#include <vector>
+
+#include "absl/functional/any_invocable.h"
+#include "absl/time/clock.h"
+#include "absl/time/time.h"
+#include "absl/types/span.h"
+#include "base/base/file_path.h"
+#include "base/base/files.h"
+#include "platform/api/task_runner.h"
+#include "platform/api/task_runner_impl.h"
+#include "sharing/api/api/sharing_platform.h"
+#include "sharing/api/public/logging.h"
+
+namespace quickshare::sharing {
+namespace {
+
+using ::quickshare::sharing::api::SharingPlatform;
+
+}  // namespace
+
+NearbyFileHandler::NearbyFileHandler(SharingPlatform& platform,
+                                     std::unique_ptr<platform::TaskRunner> runner)
+    : platform_(platform) {
+  if (runner) {
+    sequenced_task_runner_ = std::move(runner);
+  } else {
+    sequenced_task_runner_ = std::make_unique<platform::TaskRunnerImpl>(1);
+  }
+}
+
+NearbyFileHandler::~NearbyFileHandler() = default;
+
+void NearbyFileHandler::DeleteFilesFromDisk(
+    std::vector<base::FilePath> file_paths, DeleteFilesFromDiskCallback callback) {
+  sequenced_task_runner_->PostTask([callback = std::move(callback),
+                                    file_paths = std::move(file_paths)]() {
+    // wait 1 second to make the file being released from another process.
+    absl::SleepFor(absl::Seconds(1));
+    for (const auto& file_path : file_paths) {
+      if (!base::Files::FileExists(file_path)) {
+        continue;
+      }
+      if (base::Files::RemoveFile(file_path)) {
+        VLOG(1) << __func__
+                << ": Removed partial file. File=" << file_path.ToString();
+      } else {
+        // Try once more after 3 seconds.
+        absl::SleepFor(absl::Seconds(3));
+        if (base::Files::RemoveFile(file_path)) {
+          VLOG(1) << __func__
+                  << ": Removed partial file after additional delay. File="
+                  << file_path.ToString();
+        } else {
+          LOG(ERROR) << __func__
+                     << "Can't remove file: " << file_path.ToString();
+        }
+      }
+    }
+    callback();
+  });
+}
+
+void NearbyFileHandler::UpdateFilesOriginMetadata(
+    std::vector<base::FilePath> file_paths,
+    absl::AnyInvocable<void(bool success)> callback) {
+  sequenced_task_runner_->PostTask(
+      [this, callback = std::move(callback),
+       file_paths = std::move(file_paths)]() mutable {
+        std::move(callback)(platform_.UpdateFileOriginMetadata(file_paths));
+      });
+}
+
+}  // namespace quickshare::sharing

@@ -1,0 +1,150 @@
+// Copyright 2020 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#ifndef PLATFORM_API_PLATFORM_H_
+#define PLATFORM_API_PLATFORM_H_
+
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <string>
+
+#include "absl/status/statusor.h"
+#include "absl/strings/string_view.h"
+#include "platform/api/implementation/app_lifecycle_monitor.h"
+#include "platform/api/implementation/atomic_boolean.h"
+#include "platform/api/implementation/atomic_reference.h"
+#include "platform/api/implementation/ble.h"
+#include "platform/api/implementation/bluetooth_adapter.h"
+#include "platform/api/implementation/bluetooth_classic.h"
+#include "platform/api/implementation/condition_variable.h"
+#include "platform/api/implementation/count_down_latch.h"
+#include "platform/api/implementation/credential_storage.h"
+#include "platform/api/implementation/device_info.h"
+#include "platform/api/implementation/http_loader.h"
+#include "platform/api/implementation/input_file.h"
+#include "platform/api/implementation/log_message.h"
+#include "platform/api/implementation/mutex.h"
+#include "platform/api/implementation/output_file.h"
+#include "platform/api/implementation/preferences_manager.h"
+#include "platform/api/implementation/scheduled_executor.h"
+#include "platform/api/implementation/submittable_executor.h"
+#include "platform/api/implementation/timer.h"
+#include "platform/api/implementation/wifi.h"
+#include "platform/api/implementation/wifi_direct.h"
+#include "platform/api/implementation/wifi_hotspot.h"
+#include "platform/api/implementation/wifi_lan.h"
+#include "platform/api/payload_id.h"
+
+namespace quickshare::platform {
+namespace api {
+
+// API rework notes:
+// https://docs.google.com/spreadsheets/d/1erZNkX7pX8s5jWTHdxgjntxTMor3BGiY2H_fC_ldtoQ/edit#gid=381357998
+class ImplementationPlatform {
+ public:
+  // General platform support:
+  // - atomic variables (boolean, and any other copyable type)
+  // - synchronization primitives:
+  //   - mutex (regular, and recursive)
+  //   - condition variable (must work with regular mutex only)
+  //   - CountDownLatch : to ensure at least N threads are waiting.
+  // - file I/O
+  // - Logging
+  static std::string GetCustomSavePath(const std::string& parent_folder,
+                                       const std::string& file_name);
+
+  static std::string GetDownloadPath(const std::string& parent_folder,
+                                     const std::string& file_name);
+
+  static std::string GetDownloadPath(const std::string& file_name);
+
+  static std::string GetAppDataPath(const std::string& file_name);
+
+  // Atomics:
+  // =======
+
+  // Atomic boolean: special case. Uses native platform atomics.
+  // Does not use locking.
+  // Does not use dynamic memory allocations in operations.
+  static std::unique_ptr<AtomicBoolean> CreateAtomicBoolean(bool initial_value);
+
+  // Supports enums and integers up to 32-bit.
+  // Does not use locking, if platform supports 32-bit atomics natively.
+  // Does not use dynamic memory allocations in operations.
+  static std::unique_ptr<AtomicUint32> CreateAtomicUint32(std::uint32_t value);
+
+  static std::unique_ptr<CountDownLatch> CreateCountDownLatch(
+      std::int32_t count);
+
+#pragma push_macro("CreateMutex")
+#undef CreateMutex
+  static std::unique_ptr<Mutex> CreateMutex(Mutex::Mode mode);
+#pragma pop_macro("CreateMutex")
+
+  static std::unique_ptr<ConditionVariable> CreateConditionVariable(
+      Mutex* mutex);
+
+  static std::unique_ptr<InputFile> CreateInputFile(PayloadId);
+
+  static std::unique_ptr<InputFile> CreateInputFile(const std::string&);
+
+  static std::unique_ptr<OutputFile> CreateOutputFile(PayloadId);
+
+  static std::unique_ptr<OutputFile> CreateOutputFile(const std::string&);
+
+  static std::unique_ptr<LogMessage> CreateLogMessage(
+      const char* file, int line, LogMessage::Severity severity);
+
+  // Java-like Executors
+  static std::unique_ptr<SubmittableExecutor> CreateSingleThreadExecutor();
+  static std::unique_ptr<SubmittableExecutor> CreateMultiThreadExecutor(
+      std::int32_t max_concurrency);
+  static std::unique_ptr<ScheduledExecutor> CreateScheduledExecutor();
+
+  // Protocol implementations, domain-specific support
+  static std::unique_ptr<BluetoothAdapter> CreateBluetoothAdapter();
+  static std::unique_ptr<BluetoothClassicMedium> CreateBluetoothClassicMedium(
+      BluetoothAdapter&);
+  static std::unique_ptr<api::ble::BleMedium> CreateBleMedium(
+      api::BluetoothAdapter&);
+  static std::unique_ptr<api::CredentialStorage> CreateCredentialStorage();
+  static std::unique_ptr<WifiMedium> CreateWifiMedium();
+  static std::unique_ptr<WifiLanMedium> CreateWifiLanMedium();
+  static std::unique_ptr<WifiHotspotMedium> CreateWifiHotspotMedium();
+  static std::unique_ptr<WifiDirectMedium> CreateWifiDirectMedium();
+  static std::unique_ptr<Timer> CreateTimer();
+
+  static std::unique_ptr<AppLifecycleMonitor> CreateAppLifecycleMonitor(
+      std::function<void(AppLifecycleMonitor::AppLifecycleState)>
+          state_updated_callback);
+  static std::unique_ptr<api::PreferencesManager>
+  CreatePreferencesManager(absl::string_view path);
+  static std::unique_ptr<DeviceInfo> CreateDeviceInfo();
+
+  // Gets HTTP response from remote server.
+  //
+  // @param request Webrequest
+  //
+  // @return returns absl::FailedPreconditionError if having platform error.
+  //         return WebResponse if HTTP status code between 200 and 300.
+  //         other cases will return absl Status in error.
+  static absl::StatusOr<WebResponse> SendRequest(const WebRequest& request);
+};
+
+}  // namespace api
+}  // namespace quickshare::platform
+
+#endif  // PLATFORM_API_PLATFORM_H_

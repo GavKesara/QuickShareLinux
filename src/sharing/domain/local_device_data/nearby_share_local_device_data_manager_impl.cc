@@ -1,0 +1,161 @@
+// Copyright 2023 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include "sharing/domain/local_device_data/nearby_share_local_device_data_manager_impl.h"
+
+#include <stddef.h>
+
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <string>
+
+#include "sharing/stubs/location/nearby/sharing/lib/account/account_manager.h"
+#include "absl/memory/memory.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
+#include "platform/api/implementation/device_info.h"
+#include "sharing/api/common/nearby_share_enums.h"
+#include "sharing/api/api/preference_manager.h"
+#include "sharing/api/base/utf_string_conversions.h"
+#include "sharing/api/public/pref_names.h"
+#include "sharing/domain/local_device_data/nearby_share_local_device_data_manager.h"
+#include "proto/sharing/device_rpc.pb.h"
+#include "proto/sharing/field_mask.pb.h"
+#include "proto/sharing/rpc_resources.pb.h"
+#include "proto/sharing/timestamp.pb.h"
+
+namespace quickshare::sharing {
+namespace {
+using ::quickshare::platform::api::DeviceInfo;
+using ::quickshare::sharing::api::PreferenceManager;
+
+// Returns a truncated version of |name| that is |max_length| characters long.
+// For example, name="Reallylongname" with max_length=9 will return "Really...".
+// name="Reallylongname" with max_length=20 will return "Reallylongname".
+std::string GetTruncatedName(std::string name, size_t max_length) {
+  if (name.length() <= max_length) {
+    return name;
+  }
+
+  std::string ellipsis("...");
+  size_t max_name_length = max_length - ellipsis.length();
+
+  std::string truncated;
+  utils::TruncateUtf8ToByteSize(name, max_name_length, &truncated);
+  truncated.append(ellipsis);
+  return truncated;
+}
+
+}  // namespace
+
+// static
+NearbyShareLocalDeviceDataManagerImpl::Factory*
+    NearbyShareLocalDeviceDataManagerImpl::Factory::test_factory_ = nullptr;
+
+// static
+std::unique_ptr<NearbyShareLocalDeviceDataManager>
+NearbyShareLocalDeviceDataManagerImpl::Factory::Create(
+    PreferenceManager& preference_manager,
+    stubs::AccountManager& account_manager, platform::api::DeviceInfo& device_info) {
+  if (test_factory_) {
+    return test_factory_->CreateInstance();
+  }
+
+  return absl::WrapUnique(new NearbyShareLocalDeviceDataManagerImpl(
+      preference_manager, account_manager, device_info));
+}
+
+// static
+void NearbyShareLocalDeviceDataManagerImpl::Factory::SetFactoryForTesting(
+    Factory* test_factory) {
+  test_factory_ = test_factory;
+}
+
+NearbyShareLocalDeviceDataManagerImpl::Factory::~Factory() = default;
+
+NearbyShareLocalDeviceDataManagerImpl::NearbyShareLocalDeviceDataManagerImpl(
+    PreferenceManager& preference_manager, stubs::AccountManager& account_manager,
+    platform::api::DeviceInfo& device_info)
+    : preference_manager_(preference_manager),
+      account_manager_(account_manager),
+      device_info_(device_info) {}
+
+NearbyShareLocalDeviceDataManagerImpl::
+    ~NearbyShareLocalDeviceDataManagerImpl() = default;
+
+std::string NearbyShareLocalDeviceDataManagerImpl::GetDeviceName() const {
+  std::string device_name =
+      preference_manager_.GetString(PrefNames::kDeviceName, std::string());
+  return device_name.empty() ? GetDefaultDeviceName() : device_name;
+}
+
+DeviceNameValidationResult
+NearbyShareLocalDeviceDataManagerImpl::ValidateDeviceName(
+    absl::string_view name) {
+  if (name.empty()) return DeviceNameValidationResult::kErrorEmpty;
+
+  if (!utils::IsStringUtf8(std::string_view(name.data(), name.size())))
+    return DeviceNameValidationResult::kErrorNotValidUtf8;
+
+  if (name.length() > kNearbyShareDeviceNameMaxLength)
+    return DeviceNameValidationResult::kErrorTooLong;
+
+  return DeviceNameValidationResult::kValid;
+}
+
+DeviceNameValidationResult NearbyShareLocalDeviceDataManagerImpl::SetDeviceName(
+    absl::string_view name) {
+  if (name == GetDeviceName()) return DeviceNameValidationResult::kValid;
+
+  auto error = ValidateDeviceName(name);
+  if (error != DeviceNameValidationResult::kValid) return error;
+
+  preference_manager_.SetString(PrefNames::kDeviceName, name);
+
+  NotifyLocalDeviceDataChanged(/*did_device_name_change=*/true,
+                               /*did_full_name_change=*/false,
+                               /*did_icon_change=*/false);
+
+  return DeviceNameValidationResult::kValid;
+}
+
+std::string NearbyShareLocalDeviceDataManagerImpl::GetDefaultDeviceName()
+    const {
+  std::optional<stubs::AccountManager::Account> account =
+      account_manager_.GetCurrentAccount();
+
+  // If not logged in or account has not given name, use machine name instead.
+  if (!account.has_value() || account->given_name.empty()) {
+    std::string device_name =
+        device_info_.GetOsDeviceName().value_or("unknown");
+    return GetTruncatedName(device_name, kNearbyShareDeviceNameMaxLength);
+  }
+  std::string given_name = account->given_name;
+  DeviceInfo::DeviceType device_type = device_info_.GetDeviceType();
+  std::string device_name = absl::StrCat(given_name, "'s ", device_type);
+  uint64_t untruncated_length = device_name.length();
+  if (untruncated_length <= kNearbyShareDeviceNameMaxLength) {
+    return device_name;
+  }
+  uint64_t overflow_length =
+      untruncated_length - kNearbyShareDeviceNameMaxLength;
+
+  std::string truncated_name =
+      GetTruncatedName(given_name, given_name.length() - overflow_length);
+
+  return absl::StrCat(truncated_name, "'s ", device_type);
+}
+
+}  // namespace quickshare::sharing

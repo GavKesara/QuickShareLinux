@@ -1,0 +1,12 @@
+QuickShareLinux is distributed under the GNU General Public License,
+version 3 only (GPL-3.0-only). See the LICENSE file.
+
+This program includes code from Google's Nearby project (google/nearby)
+and the Linux patches from kidfromjupiter/nearby. Those portions are
+Copyright Google LLC and their contributors and remain licensed under
+the Apache License, Version 2.0. The copyright and license notices in
+those file headers are left in place. A copy of the Apache License is
+in LICENSE.Apache-2.0. The vendored copies are in
+third_party/ukey2/LICENSE and third_party/protoutil/LICENSE.
+
+MurmurHash3 (third_party/murmur3) is in the public domain.

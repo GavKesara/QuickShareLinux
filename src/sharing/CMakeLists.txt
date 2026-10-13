@@ -1,0 +1,72 @@
+set(QS_SHARING_SOURCES
+  api/base/encode.cc
+  api/base/mime.cc
+  api/common/nearby_share_prefs.cc
+  api/common/nearby_share_switches.cc
+  api/public/connectivity_manager_impl.cc
+  api/public/context_impl.cc
+  domain/advertisement_capabilities.cc
+  domain/advertisement.cc
+  domain/attachment.cc
+  domain/attachment_container.cc
+  domain/certificates/common.cc
+  domain/certificates/nearby_share_certificate_manager.cc
+  domain/certificates/nearby_share_certificate_manager_impl.cc
+  domain/certificates/nearby_share_certificate_storage.cc
+  domain/certificates/nearby_share_certificate_storage_impl.cc
+  domain/certificates/nearby_share_decrypted_public_certificate.cc
+  domain/certificates/nearby_share_encrypted_metadata_key.cc
+  domain/certificates/nearby_share_private_certificate.cc
+  domain/file_attachment.cc
+  domain/local_device_data/nearby_share_local_device_data_manager.cc
+  domain/local_device_data/nearby_share_local_device_data_manager_impl.cc
+  domain/share_target.cc
+  domain/text_attachment.cc
+  domain/transfer_metadata_builder.cc
+  domain/transfer_metadata.cc
+  domain/wifi_credentials_attachment.cc
+  service/fast_initiation/nearby_fast_initiation_impl.cc
+  service/incoming_frames_reader.cc
+  service/incoming_share_session.cc
+  service/nearby_connection_impl.cc
+  service/nearby_connections_manager.cc
+  service/nearby_connections_manager_factory.cc
+  service/nearby_connections_manager_impl.cc
+  service/nearby_connections_service.cc
+  service/nearby_connections_service_impl.cc
+  service/nearby_connections_stream_buffer_manager.cc
+  service/nearby_file_handler.cc
+  service/nearby_sharing_service.cc
+  service/nearby_sharing_service_factory.cc
+  service/nearby_sharing_service_impl.cc
+  service/nearby_sharing_settings.cc
+  service/nearby_sharing_util.cc
+  service/outgoing_share_session.cc
+  service/outgoing_targets_manager.cc
+  service/paired_key_verification_runner.cc
+  service/payload_tracker.cc
+  service/scheduling/format.cc
+  service/scheduling/nearby_share_expiration_scheduler.cc
+  service/scheduling/nearby_share_on_demand_scheduler.cc
+  service/scheduling/nearby_share_periodic_scheduler.cc
+  service/scheduling/nearby_share_scheduler_base.cc
+  service/scheduling/nearby_share_scheduler.cc
+  service/scheduling/nearby_share_scheduler_factory.cc
+  service/scheduling/nearby_share_scheduler_utils.cc
+  service/service_observers.cc
+  service/share_session.cc
+  service/thread_timer.cc
+  service/transfer_manager.cc
+  service/wrapped_share_target_discovered_callback.cc
+)
+
+# stubs/ is header-only (no .cc); it is reachable through the src/ include dir.
+add_library(qs_sharing STATIC ${QS_SHARING_SOURCES})
+target_include_directories(qs_sharing PUBLIC "${PROJECT_SOURCE_DIR}/src" "${PROJECT_SOURCE_DIR}")
+target_link_libraries(qs_sharing PUBLIC
+  qs_connections
+  qs_platform
+  qs_base
+  qs_proto
+  protoutil
+  ${QS_ABSL_LIBS})

@@ -1,0 +1,126 @@
+app-id: top.suhasdissa.QuickShareLinux
+runtime: org.kde.Platform
+runtime-version: "6.11"
+sdk: org.kde.Sdk
+command: quickshare
+
+finish-args:
+  - --share=ipc
+  - --socket=fallback-x11
+  - --socket=wayland
+  # OpenGL scene graph for the Qt Quick UI.
+  - --device=dri
+  # Flatpak zeroes file mtimes, so Qt never invalidates its QML disk cache for the bundled
+  # (qrc) QML and keeps running the QML from the first install after an update.
+  - --env=QML_DISABLE_DISK_CACHE=1
+  # Peers on the LAN (Wi-Fi LAN transfers, mDNS discovery).
+  - --share=network
+  # Raw L2CAP/RFCOMM sockets for BLE advertising and Bluetooth Classic transfers.
+  - --allow=bluetooth
+  # Adapter control, advertising and device discovery all go through BlueZ.
+  - --system-talk-name=org.bluez
+  # Wi-Fi Direct / hotspot connections used for high-bandwidth transfers.
+  - --system-talk-name=org.freedesktop.NetworkManager
+  # mDNS service advertisement and browsing.
+  - --system-talk-name=org.freedesktop.Avahi
+  # Detects firewalld rules blocking Wi-Fi LAN transfers; the in-app Allow button opens them
+  # (firewalld asks polkit for authorization).
+  - --system-talk-name=org.fedoraproject.FirewallD1
+  # Device name (static/pretty hostname) and session type reported to peers (device_info).
+  - --system-talk-name=org.freedesktop.hostname1
+  - --system-talk-name=org.freedesktop.login1
+  # Incoming-transfer notifications.
+  - --talk-name=org.freedesktop.Notifications
+  # System tray icon; the app keeps running in the tray after its window is closed.
+  - --talk-name=org.kde.StatusNotifierWatcher
+  # Qt registers the tray item as org.kde.StatusNotifierItem-<pid>-<n>. Flatpak wildcards only
+  # match whole name components, so a prefix like StatusNotifierItem-* is rejected.
+  - --own-name=org.kde.*
+  # The app also owns top.suhasdissa.QuickShareLinux on the session bus. Flatpak grants an app
+  # its own app-id name (and sub-names) implicitly, so no --own-name is needed for it.
+  #
+  # Received files land in the XDG download directory. Sending uses the QFileDialog portal
+  # (the app deliberately uses QApplication), so no broader filesystem access is granted.
+  - --filesystem=xdg-download
+
+cleanup:
+  - /include
+  - /lib/pkgconfig
+  - /lib/cmake
+  - /share/man
+  - "*.a"
+  # Build-time code generators only.
+  - /bin/protoc
+  - /bin/protoc-*
+  - /bin/sdbus-c++-xml2cpp
+
+modules:
+  # openssl, libcurl, libsystemd and libbluetooth (headers + pkg-config) are provided by
+  # org.kde.Sdk / the runtime, so only the libraries it lacks are built here.
+
+  # The SDK's abseil (20250512) is too old for the app (absl::MutexLock(Mutex&)). Built static
+  # and shared with protobuf as a single copy, so there is no duplicated global state.
+  - name: abseil-cpp
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DCMAKE_CXX_STANDARD=20
+      - -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+      - -DABSL_PROPAGATE_CXX_STD=ON
+      - -DABSL_BUILD_TESTING=OFF
+    sources:
+      - type: archive
+        url: https://github.com/abseil/abseil-cpp/releases/download/20260817.0/abseil-cpp-20260817.0.tar.gz
+        sha256: f7e05179df39c45434cad433f5783840bb3788ef322976f9138bc6b72b3a107d
+
+  - name: protobuf
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DCMAKE_CXX_STANDARD=20
+      - -Dprotobuf_BUILD_TESTS=OFF
+      - -Dprotobuf_ABSL_PROVIDER=package
+      - -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+    sources:
+      - type: archive
+        url: https://github.com/protocolbuffers/protobuf/releases/download/v36.1/protobuf-36.1.tar.gz
+        sha256: dc74fa582f559cbd31614ddfefb4868f43c919d7184bde514bb47f90c6025eb8
+
+  - name: nlohmann_json
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DJSON_BuildTests=OFF
+    sources:
+      - type: archive
+        url: https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz
+        sha256: 42f6e95cad6ec532fd372391373363b62a14af6d771056dbfc86160e6dfff7aa
+
+  - name: sdbus-cpp
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DSDBUSCPP_BUILD_CODEGEN=ON
+      - -DSDBUSCPP_BUILD_DOCS=OFF
+      - -DSDBUSCPP_BUILD_TESTS=OFF
+      - -DSDBUSCPP_BUILD_EXAMPLES=OFF
+    sources:
+      - type: archive
+        url: https://github.com/Kistler-Group/sdbus-cpp/archive/refs/tags/v2.3.1.tar.gz
+        sha256: 3a289eded586c26d06c1387de72c7bf7c809527a70d51ba6401fe61059b19626
+
+  - name: quickshare
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DQUICKSHARE_BUILD_TESTS=OFF
+      - -DQUICKSHARE_BUILD_CLI=OFF
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - build
+          - build-ui
+          - .git
+          - .flatpak-builder
+          - tools/migrate

@@ -1,0 +1,403 @@
+// Copyright 2022-2023 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include "sharing/service/paired_key_verification_runner.h"
+
+#include <stddef.h>
+#include <stdint.h>
+
+#include <functional>
+#include <memory>
+#include <optional>
+#include <ostream>
+#include <string>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+#include "absl/base/nullability.h"
+#include "absl/functional/any_invocable.h"
+#include "absl/time/time.h"
+#include "platform/api/clock.h"
+#include "proto/sharing/sharing_enums.pb.h"
+#include "sharing/domain/certificates/common.h"
+#include "sharing/domain/certificates/constants.h"
+#include "sharing/domain/certificates/nearby_share_certificate_manager.h"
+#include "sharing/domain/certificates/nearby_share_decrypted_public_certificate.h"
+#include "sharing/service/incoming_frames_reader.h"
+#include "sharing/api/public/logging.h"
+#include "proto/sharing/enums.pb.h"
+#include "proto/sharing/rpc_resources.pb.h"
+#include "proto/sharing/timestamp.pb.h"
+#include "proto/sharing/wire_format.pb.h"
+
+namespace quickshare::sharing {
+
+using ::location::nearby::proto::sharing::OSType;
+using ::nearby::sharing::proto::DeviceVisibility;
+using ::nearby::sharing::service::proto::Frame;
+using ::nearby::sharing::service::proto::PairedKeyEncryptionFrame;
+using ::nearby::sharing::service::proto::PairedKeyResultFrame;
+using ::nearby::sharing::service::proto::V1Frame;
+
+namespace {
+
+// The size of the random byte array used for the encryption frame's signed data
+// if a valid signature cannot be generated. This size is consistent with the
+// GmsCore implementation.
+const size_t kNearbyShareNumBytesRandomSignature = 72;
+constexpr absl::Duration kRelaxAfterSetVisibilityTimeout = absl::Minutes(1);
+
+PairedKeyVerificationRunner::PairedKeyVerificationResult Convert(
+    nearby::sharing::service::proto::PairedKeyResultFrame::Status status) {
+  switch (status) {
+    case PairedKeyResultFrame::SUCCESS:
+      return PairedKeyVerificationRunner::PairedKeyVerificationResult::kSuccess;
+
+    case PairedKeyResultFrame::FAIL:
+      return PairedKeyVerificationRunner::PairedKeyVerificationResult::kFail;
+
+    case PairedKeyResultFrame::UNKNOWN:
+    case PairedKeyResultFrame::UNABLE:
+      return PairedKeyVerificationRunner::PairedKeyVerificationResult::kUnable;
+  }
+}
+
+std::vector<uint8_t> PadPrefix(char prefix, std::vector<uint8_t> bytes) {
+  bytes.insert(bytes.begin(), prefix);
+  return bytes;
+}
+
+}  // namespace
+
+std::ostream& operator<<(
+    std::ostream& out,
+    const PairedKeyVerificationRunner::PairedKeyVerificationResult& obj) {
+  out << static_cast<std::underlying_type<
+      PairedKeyVerificationRunner::PairedKeyVerificationResult>::type>(obj);
+  return out;
+}
+
+PairedKeyVerificationRunner::PairedKeyVerificationRunner(
+    platform::Clock* absl_nonnull clock, OSType os_type, bool share_target_is_incoming,
+    const VisibilityHistory& visibility_history,
+    const std::vector<uint8_t>& token,
+    absl::AnyInvocable<void(const Frame& frame)> frame_writer,
+    const std::optional<NearbyShareDecryptedPublicCertificate>& certificate,
+    NearbyShareCertificateManager* absl_nonnull certificate_manager,
+    IncomingFramesReader* absl_nonnull frames_reader,
+    absl::Duration read_frame_timeout)
+    : clock_(*clock),
+      certificate_manager_(*certificate_manager),
+      frames_reader_(*frames_reader),
+      share_target_is_incoming_(share_target_is_incoming),
+      os_type_(os_type),
+      visibility_history_(visibility_history),
+      certificate_(certificate),
+      read_frame_timeout_(read_frame_timeout),
+      raw_token_(token),
+      frame_writer_(std::move(frame_writer)) {}
+
+PairedKeyVerificationRunner::~PairedKeyVerificationRunner() = default;
+
+void PairedKeyVerificationRunner::Run(
+    std::function<void(PairedKeyVerificationResult, OSType)> callback) {
+  DCHECK(!callback_);
+  callback_ = std::move(callback);
+  verification_result_ = PairedKeyVerificationResult::kSuccess;
+
+  SendPairedKeyEncryptionFrame();
+  frames_reader_.ReadFrame(
+      V1Frame::PAIRED_KEY_ENCRYPTION,
+      [&, runner = GetWeakPtr()](bool is_timeout,
+                                 std::optional<V1Frame> frame) {
+        auto verification_runner = runner.lock();
+        if (verification_runner == nullptr) {
+          LOG(WARNING) << "PairedKeyVerificationRunner is released before.";
+          return;
+        }
+        OnReadPairedKeyEncryptionFrame(std::move(frame));
+      },
+      read_frame_timeout_);
+}
+
+void PairedKeyVerificationRunner::OnReadPairedKeyEncryptionFrame(
+    std::optional<V1Frame> frame) {
+  if (!frame.has_value()) {
+    LOG(WARNING) << __func__ << ": Failed to read remote paired key encryption";
+    std::move(callback_)(PairedKeyVerificationResult::kFail,
+                         OSType::UNKNOWN_OS_TYPE);
+    return;
+  }
+  PairedKeyVerificationResult auth_token_hash_result =
+      VerifyAuthTokenHashWithPrivateCertificates(*frame);
+  if (auth_token_hash_result == PairedKeyVerificationResult::kUnable) {
+    if (share_target_is_incoming_ &&
+        visibility_history_.visibility !=
+            DeviceVisibility::DEVICE_VISIBILITY_EVERYONE) {
+      VLOG(1) << __func__ << ": Incoming connection with non-everyone "
+                 "visibility cannot verify public certificate. "
+                 "Treating as kFail.";
+      auth_token_hash_result = PairedKeyVerificationResult::kFail;
+    }
+  }
+
+  ApplyResult(auth_token_hash_result);
+  VLOG(1) << __func__ << ": Remote public certificate verification result "
+          << auth_token_hash_result;
+
+  PairedKeyVerificationResult local_result =
+      VerifyPairedKeyEncryptionFrame(*frame);
+  ApplyResult(local_result);
+  VLOG(1) << __func__ << ": Paired key encryption verification result "
+          << local_result;
+  if (share_target_is_incoming_ && visibility_history_.visibility ==
+      DeviceVisibility::DEVICE_VISIBILITY_HIDDEN) {
+    VLOG(1) << __func__
+            << ": device is hidden, reject all incoming connections.";
+    local_result = PairedKeyVerificationResult::kFail;
+    ApplyResult(PairedKeyVerificationResult::kFail);
+  }
+
+
+  SendPairedKeyResultFrame(local_result);
+
+  frames_reader_.ReadFrame(
+      V1Frame::PAIRED_KEY_RESULT,
+      [this, runner = GetWeakPtr()](bool is_timeout,
+                                    std::optional<V1Frame> frame) {
+        auto verification_runner = runner.lock();
+        if (verification_runner == nullptr) {
+          LOG(WARNING) << "PairedKeyVerificationRunner is released before.";
+          return;
+        }
+        OnReadPairedKeyResultFrame(std::move(frame));
+      },
+      read_frame_timeout_);
+}
+
+void PairedKeyVerificationRunner::OnReadPairedKeyResultFrame(
+    std::optional<V1Frame> frame) {
+  if (!frame.has_value()) {
+    LOG(WARNING) << __func__ << ": Failed to read remote paired key result";
+    std::move(callback_)(PairedKeyVerificationResult::kFail,
+                         OSType::UNKNOWN_OS_TYPE);
+    return;
+  }
+
+  PairedKeyVerificationResult remote_result =
+      Convert(frame->paired_key_result().status());
+  ApplyResult(remote_result);
+  VLOG(1) << __func__ << ": Paired key result frame result " << remote_result;
+
+  VLOG(1) << __func__ << ": Combined verification result "
+          << verification_result_;
+
+  OSType os_type = OSType::UNKNOWN_OS_TYPE;
+  if (frame->paired_key_result().has_os_type()) {
+    os_type = frame->paired_key_result().os_type();
+  }
+
+  std::move(callback_)(verification_result_, os_type);
+}
+
+void PairedKeyVerificationRunner::SendPairedKeyResultFrame(
+    PairedKeyVerificationResult result) {
+  Frame frame;
+  frame.set_version(Frame::V1);
+  V1Frame* v1_frame = frame.mutable_v1();
+  v1_frame->set_type(V1Frame::PAIRED_KEY_RESULT);
+  PairedKeyResultFrame* result_frame = v1_frame->mutable_paired_key_result();
+
+  switch (result) {
+    case PairedKeyVerificationResult::kUnable:
+      result_frame->set_status(PairedKeyResultFrame::UNABLE);
+      break;
+
+    case PairedKeyVerificationResult::kSuccess:
+      result_frame->set_status(PairedKeyResultFrame::SUCCESS);
+      break;
+
+    case PairedKeyVerificationResult::kFail:
+      result_frame->set_status(PairedKeyResultFrame::FAIL);
+      break;
+  }
+
+  // Set OS type to allow remote device knowns the paring device OS type.
+  result_frame->set_os_type(os_type_);
+
+  frame_writer_(frame);
+}
+
+void PairedKeyVerificationRunner::SendPairedKeyEncryptionFrame() {
+  std::vector<uint8_t> padded_token = PadPrefix(
+      share_target_is_incoming_ ? kNearbyShareReceiverVerificationPrefix
+                                : kNearbyShareSenderVerificationPrefix,
+      raw_token_);
+  DeviceVisibility primary_visibility;
+  DeviceVisibility secondary_visibility;
+  if (visibility_history_.screen_locked_advertising) {
+    primary_visibility = DeviceVisibility::DEVICE_VISIBILITY_SELF_SHARE;
+    secondary_visibility = visibility_history_.visibility;
+  } else {
+    primary_visibility = visibility_history_.visibility;
+    secondary_visibility = visibility_history_.last_visibility;
+  }
+  std::optional<std::vector<uint8_t>> signature =
+      certificate_manager_.SignWithPrivateCertificate(primary_visibility,
+                                                      padded_token);
+  if (!signature.has_value() || signature->empty()) {
+    signature = GenerateRandomBytes(kNearbyShareNumBytesRandomSignature);
+  }
+
+  std::vector<uint8_t> certificate_id_hash;
+  if (certificate_.has_value()) {
+    certificate_id_hash = certificate_->HashAuthenticationToken(raw_token_);
+  }
+  if (certificate_id_hash.empty()) {
+    certificate_id_hash =
+        GenerateRandomBytes(kNearbyShareNumBytesAuthenticationTokenHash);
+  }
+
+  Frame frame;
+  frame.set_version(Frame::V1);
+  V1Frame* v1_frame = frame.mutable_v1();
+  v1_frame->set_type(V1Frame::PAIRED_KEY_ENCRYPTION);
+  PairedKeyEncryptionFrame* encryption_frame =
+      v1_frame->mutable_paired_key_encryption();
+  encryption_frame->set_signed_data(signature->data(), signature->size());
+  if (IsVisibilityRecentlyUpdated()) {
+    LOG(INFO)
+        << "Attempts to sign authentication token with a previous private key.";
+    std::optional<std::vector<uint8_t>> optional_signature =
+        certificate_manager_.SignWithPrivateCertificate(secondary_visibility,
+                                                        padded_token);
+
+    if (optional_signature.has_value()) {
+      encryption_frame->set_optional_signed_data(optional_signature->data(),
+                                                 optional_signature->size());
+    }
+  }
+  encryption_frame->set_secret_id_hash(certificate_id_hash.data(),
+                                       certificate_id_hash.size());
+
+  frame_writer_(frame);
+}
+
+PairedKeyVerificationRunner::PairedKeyVerificationResult
+PairedKeyVerificationRunner::VerifyAuthTokenHashWithPrivateCertificates(
+    const nearby::sharing::service::proto::V1Frame& frame) {
+  const std::string& frame_hash =
+      frame.paired_key_encryption().secret_id_hash();
+  std::vector<uint8_t> frame_hash_data{frame_hash.begin(), frame_hash.end()};
+
+  std::vector<DeviceVisibility> visibilities_to_check;
+  // At most 3 visibilities to check.
+  visibilities_to_check.reserve(3);
+  // If we are advertising under lock screen then verify against self share
+  // private certificate first.
+  if (visibility_history_.screen_locked_advertising) {
+    visibilities_to_check.push_back(
+        DeviceVisibility::DEVICE_VISIBILITY_SELF_SHARE);
+  }
+  visibilities_to_check.push_back(visibility_history_.visibility);
+  if (IsVisibilityRecentlyUpdated()) {
+    visibilities_to_check.push_back(visibility_history_.last_visibility);
+  }
+  for (const auto& visibility : visibilities_to_check) {
+    std::optional<std::vector<uint8_t>> hash =
+        certificate_manager_.HashAuthenticationTokenWithPrivateCertificate(
+            visibility, raw_token_);
+
+    if (hash.has_value() && *hash == frame_hash_data) {
+      VLOG(1) << __func__
+              << ": Successfully verified remote public certificate.";
+      return PairedKeyVerificationResult::kSuccess;
+    }
+  }
+  VLOG(1) << __func__ << ": Unable to verify remote public certificate.";
+  return PairedKeyVerificationResult::kUnable;
+}
+
+PairedKeyVerificationRunner::PairedKeyVerificationResult
+PairedKeyVerificationRunner::VerifyPairedKeyEncryptionFrame(
+    const V1Frame& frame) {
+  if (!certificate_) {
+    VLOG(1) << __func__
+            << ": Unable to verify remote paired key encryption frame. "
+               "Remote side is not a known share target.";
+    return PairedKeyVerificationResult::kUnable;
+  }
+
+  auto signed_data = frame.paired_key_encryption().signed_data();
+  std::vector<uint8_t> data(signed_data.begin(), signed_data.end());
+  std::vector<uint8_t> padded_token = PadPrefix(
+      share_target_is_incoming_ ? kNearbyShareSenderVerificationPrefix
+                                : kNearbyShareReceiverVerificationPrefix,
+      raw_token_);
+  if (!certificate_->VerifySignature(padded_token, data)) {
+    if (!frame.paired_key_encryption().has_optional_signed_data()) {
+      LOG(WARNING) << __func__
+                   << ": Unable to verify remote paired key encryption frame. "
+                      "no optional signed data.";
+      return PairedKeyVerificationResult::kFail;
+    }
+    // Verify optional signed data.
+    auto optional_signed_data =
+        frame.paired_key_encryption().optional_signed_data();
+    std::vector<uint8_t> optional_data(optional_signed_data.begin(),
+                                       optional_signed_data.end());
+    if (certificate_->VerifySignature(padded_token, optional_data)) {
+      LOG(INFO) << "Successfully verified remote paired key encryption "
+                   "frame with the optional signed data.";
+    } else {
+      LOG(WARNING) << __func__
+                   << ": Unable to verify remote paired key encryption frame.";
+      return PairedKeyVerificationResult::kFail;
+    }
+  }
+
+  VLOG(1) << __func__
+          << ": Successfully verified remote paired key encryption frame.";
+  return PairedKeyVerificationResult::kSuccess;
+}
+
+void PairedKeyVerificationRunner::ApplyResult(
+    PairedKeyVerificationResult result) {
+  if (verification_result_ == PairedKeyVerificationResult::kFail) {
+    // If already failed, then nothing to do.
+    return;
+  }
+  switch (result) {
+    case PairedKeyVerificationResult::kSuccess:
+      // Success does not change final result.
+      break;
+    case PairedKeyVerificationResult::kFail:
+      // If new result is kFail, then the whole transaction failed.
+      verification_result_ = PairedKeyVerificationResult::kFail;
+      break;
+    case PairedKeyVerificationResult::kUnable:
+      verification_result_ = PairedKeyVerificationResult::kUnable;
+      break;
+  }
+}
+
+bool PairedKeyVerificationRunner::IsVisibilityRecentlyUpdated() const {
+  return visibility_history_.visibility !=
+             visibility_history_.last_visibility &&
+         (clock_.Now() - visibility_history_.last_visibility_time <
+          kRelaxAfterSetVisibilityTimeout);
+}
+
+}  // namespace quickshare::sharing

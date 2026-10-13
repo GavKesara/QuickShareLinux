@@ -1,0 +1,208 @@
+// Copyright 2020 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#ifndef CORE_INTERNAL_MEDIUMS_BLE_BLE_ADVERTISEMENT_H_
+#define CORE_INTERNAL_MEDIUMS_BLE_BLE_ADVERTISEMENT_H_
+
+#include <string>
+#include <utility>
+
+#include "absl/status/statusor.h"
+#include "absl/strings/escaping.h"
+#include "absl/strings/str_format.h"
+#include "connections/mediums/ble/ble_advertisement_header.h"
+#include "platform/api/byte_array.h"
+
+namespace quickshare::connections {
+namespace mediums {
+
+// Represents the format of the Mediums BLE Advertisement used in Advertising +
+// Discovery.
+//
+// [VERSION][SOCKET_VERSION][FAST_ADVERTISEMENT_FLAG][1_RESERVED_BIT]
+// [SERVICE_ID_HASH][DATA_SIZE][DATA][DEVICE_TOKEN][EXTRA_FIELD]
+//
+// For fast advertisement, we remove SERVICE_ID_HASH since we already have one
+// copy in Nearby Connections(b/138447288)
+// [VERSION][SOCKET_VERSION][FAST_ADVERTISEMENT_FLAG][1_RESERVED_BIT][DATA_SIZE]
+// [DATA][DEVICE_TOKEN][EXTRA_FIELD]
+//
+// See go/nearby-ble-design for more information.
+class BleAdvertisement {
+ public:
+  // Versions of the BleAdvertisement.
+  enum class Version {
+    kUndefined = 0,
+    kV1 = 1,
+    kV2 = 2,
+    // Version is only allocated 3 bits in the BleAdvertisement, so this can
+    // never go beyond V7.
+  };
+
+  // Versions of the BLESocket.
+  enum class SocketVersion {
+    kUndefined = 0,
+    kV1 = 1,
+    kV2 = 2,
+    // SocketVersion is only allocated 3 bits in the BleAdvertisement, so this
+    // can never go beyond V7.
+  };
+
+  static constexpr int kServiceIdHashLength = 3;
+  static constexpr int kDeviceTokenLength = 2;
+  static constexpr int kVersionLength = 1;
+  static constexpr int kVersionBitmask = 0x0E0;
+  static constexpr int kSocketVersionBitmask = 0x01C;
+  static constexpr int kFastAdvertisementFlagBitmask = 0x002;
+  static constexpr int kSecondProfileBitmask = 0x001;
+  static constexpr int kDataSizeLength = 4;      // Length of one int.
+  static constexpr int kFastDataSizeLength = 1;  // Length of one byte.
+  static constexpr int kMinAdvertisementLength =
+      kVersionLength + kServiceIdHashLength + kDataSizeLength;
+  // The maximum length for a Gatt characteristic value is 512 bytes, so make
+  // sure the entire advertisement is less than that. The data can take up
+  // whatever space is remaining after the bytes preceding it.
+  static constexpr int kMaxAdvertisementLength = 512;
+  static constexpr int kMinFastAdvertisementLegth =
+      kVersionLength + kFastDataSizeLength;
+  // The maximum length for the scan response is 31 bytes. However, with the
+  // required header that comes before the service data, this leaves the
+  // advertiser with 27 leftover bytes.
+  static constexpr int kMaxFastAdvertisementLength = 27;
+  static constexpr int kExtraFieldsMaskLength = 1;
+  // Hashable
+  bool operator==(const BleAdvertisement& rhs) const;
+  template <typename H>
+  friend H AbslHashValue(H h, const BleAdvertisement& b) {
+    return H::combine(std::move(h), b.version_, b.socket_version_,
+                      b.fast_advertisement_, b.service_id_hash_, b.data_,
+                      b.device_token_, b.psm_);
+  }
+
+  BleAdvertisement() = default;
+  BleAdvertisement(Version version, SocketVersion socket_version,
+                   const platform::ByteArray& service_id_hash, const platform::ByteArray& data,
+                   const platform::ByteArray& device_token,
+                   int psm = BleAdvertisementHeader::kDefaultPsmValue);
+
+  static absl::StatusOr<BleAdvertisement> CreateBleAdvertisement(
+      const platform::ByteArray& ble_advertisement_bytes);
+  BleAdvertisement(const BleAdvertisement&) = default;
+  BleAdvertisement& operator=(const BleAdvertisement&) = default;
+  BleAdvertisement(BleAdvertisement&&) = default;
+  BleAdvertisement& operator=(BleAdvertisement&&) = default;
+  ~BleAdvertisement() = default;
+
+  // Returns ByteArray for legacy advertisement.
+  explicit operator platform::ByteArray() const;
+
+  // Returns ByteArray for extended advertisement, which included extra field.
+  platform::ByteArray ByteArrayWithExtraField() const;
+
+  bool IsValid() const { return IsSupportedVersion(version_); }
+  Version GetVersion() const { return version_; }
+  SocketVersion GetSocketVersion() const { return socket_version_; }
+  bool IsFastAdvertisement() const { return fast_advertisement_; }
+  bool IsSecondProfile() const { return is_second_profile_; }
+  platform::ByteArray GetServiceIdHash() const { return service_id_hash_; }
+  platform::ByteArray& GetData() & { return data_; }
+  const platform::ByteArray& GetData() const& { return data_; }
+  platform::ByteArray&& GetData() && { return std::move(data_); }
+  const platform::ByteArray&& GetData() const&& { return std::move(data_); }
+  platform::ByteArray GetDeviceToken() const { return device_token_; }
+  int GetPsm() const { return psm_; }
+  void SetPsm(int psm) { psm_ = psm; }
+  platform::ByteArray GetRxInstantConnectionAdv() const {
+    return rx_instant_connection_adv_;
+  }
+  void SetRxInstantConnectionAdv(const platform::ByteArray& rx_instant_connection_adv) {
+    rx_instant_connection_adv_ = rx_instant_connection_adv;
+  }
+  std::string ToReadableString() const {
+    return absl::StrFormat(
+        "BleAdvertisement { version=%d, socket_version=%d, "
+        "fast_advertisement=%v, service_id_hash=%s, data=%s, device_token=%s, "
+        "psm=%d }",
+        static_cast<int>(version_), static_cast<int>(socket_version_),
+        fast_advertisement_,
+        absl::BytesToHexString(service_id_hash_.AsStringView()),
+        absl::BytesToHexString(data_.AsStringView()),
+        absl::BytesToHexString(device_token_.AsStringView()), psm_);
+  }
+
+ private:
+  // Represents the extra fields of the `BleAdvertisement` used in Advertising +
+  // Discovery. The maximum number of extra fields is 8. The format of the field
+  // can be different, but the order of the fields should be fixed.
+  //
+  // e.g. [BIT_MASK][X_FIELD(2 Bytes)][LENGTH(2 Bytes) + Y_FIELD(n Bytes)]
+  //
+  // Below is the current fields
+  // [BIT_MASK][PSM_VALUE(2 Bytes)][RX_INSTANT_CONNECTION_ADV(1 Byte length +
+  // 1~N Bytes data)]
+  //
+  // The PSM (protocol service multiplexer) value is used for create data
+  // connection on L2CAP socket. It only exists when remote device supports
+  // L2CAP socket feature.
+  class BleExtraFields {
+   public:
+    static constexpr int kRxInstantConnectionAdvSizeLength = 1;
+
+    explicit BleExtraFields(int psm,
+                            const platform::ByteArray& rx_instant_connection_adv);
+    explicit BleExtraFields(const platform::ByteArray& ble_extra_fields_bytes);
+    explicit operator platform::ByteArray() const;
+
+    int GetPsm() const { return psm_; }
+
+    platform::ByteArray GetRxInstantConnectionAdv() const {
+      return rx_instant_connection_adv_;
+    }
+
+   private:
+    int psm_ = BleAdvertisementHeader::kDefaultPsmValue;
+    platform::ByteArray rx_instant_connection_adv_;
+  };
+
+  void DoInitialize(bool fast_advertisement, Version version,
+                    SocketVersion socket_version,
+                    const platform::ByteArray& service_id_hash, const platform::ByteArray& data,
+                    const platform::ByteArray& device_token, int psm);
+  static bool IsSupportedVersion(Version version);
+  static bool IsSupportedSocketVersion(SocketVersion socket_version);
+  int ComputeAdvertisementLength(int data_length, int total_optional_length,
+                                 bool fast_advertisement) const {
+    // The advertisement length is the minimum length + the length of the data +
+    // the length of in-use optional fields.
+    return fast_advertisement ? (kMinFastAdvertisementLegth + data_length +
+                                 total_optional_length)
+                              : (kMinAdvertisementLength + data_length +
+                                 total_optional_length);
+  }
+
+  Version version_{Version::kUndefined};
+  SocketVersion socket_version_{SocketVersion::kUndefined};
+  bool fast_advertisement_ = false;
+  bool is_second_profile_ = false;
+  platform::ByteArray service_id_hash_;
+  platform::ByteArray data_;
+  platform::ByteArray device_token_;
+  int psm_ = BleAdvertisementHeader::kDefaultPsmValue;
+  platform::ByteArray rx_instant_connection_adv_;
+};
+
+}  // namespace mediums
+}  // namespace quickshare::connections
+
+#endif  // CORE_INTERNAL_MEDIUMS_BLE_BLE_ADVERTISEMENT_H_

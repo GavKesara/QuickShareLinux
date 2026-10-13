@@ -1,0 +1,120 @@
+// Copyright 2022-2023 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#ifndef THIRD_PARTY_NEARBY_SHARING_PAIRED_KEY_VERIFICATION_RUNNER_H_
+#define THIRD_PARTY_NEARBY_SHARING_PAIRED_KEY_VERIFICATION_RUNNER_H_
+
+#include <stdint.h>
+
+#include <functional>
+#include <memory>
+#include <optional>
+#include <vector>
+
+#include "absl/base/nullability.h"
+#include "absl/functional/any_invocable.h"
+#include "absl/time/time.h"
+#include "platform/api/clock.h"
+#include "proto/sharing/sharing_enums.pb.h"
+#include "sharing/domain/certificates/nearby_share_certificate_manager.h"
+#include "sharing/domain/certificates/nearby_share_decrypted_public_certificate.h"
+#include "sharing/service/incoming_frames_reader.h"
+#include "proto/sharing/enums.pb.h"
+#include "proto/sharing/wire_format.pb.h"
+
+namespace quickshare::sharing {
+
+class PairedKeyVerificationRunner
+    : public std::enable_shared_from_this<PairedKeyVerificationRunner> {
+ public:
+  enum class PairedKeyVerificationResult {
+    // Succeeded with verification.
+    kSuccess,
+    // Failed to verify.
+    kFail,
+    // Unable to verify. Occurs when missing proper certificates.
+    kUnable,
+  };
+
+  struct VisibilityHistory {
+    nearby::sharing::proto::DeviceVisibility visibility;
+    nearby::sharing::proto::DeviceVisibility last_visibility;
+    absl::Time last_visibility_time;
+    // Set to true if device is advertising under lock screen.
+    bool screen_locked_advertising = false;
+  };
+
+  PairedKeyVerificationRunner(
+      platform::Clock* absl_nonnull clock,
+      location::nearby::proto::sharing::OSType os_type,
+      bool share_target_is_incoming,
+      const VisibilityHistory& visibility_history,
+      const std::vector<uint8_t>& token,
+      absl::AnyInvocable<
+          void(const nearby::sharing::service::proto::Frame& frame)>
+          frame_writer,
+      const std::optional<NearbyShareDecryptedPublicCertificate>& certificate,
+      NearbyShareCertificateManager* absl_nonnull certificate_manager,
+      IncomingFramesReader* absl_nonnull frames_reader,
+      absl::Duration read_frame_timeout);
+
+  ~PairedKeyVerificationRunner();
+
+  void Run(std::function<
+           void(PairedKeyVerificationResult verification_result,
+                ::location::nearby::proto::sharing::OSType remote_os_type)>
+               callback);
+
+  std::weak_ptr<PairedKeyVerificationRunner> GetWeakPtr() {
+    return this->weak_from_this();
+  }
+
+ private:
+  void SendPairedKeyEncryptionFrame();
+  void OnReadPairedKeyEncryptionFrame(
+      std::optional<nearby::sharing::service::proto::V1Frame> frame);
+  void OnReadPairedKeyResultFrame(
+      std::optional<nearby::sharing::service::proto::V1Frame> frame);
+  void SendPairedKeyResultFrame(PairedKeyVerificationResult result);
+  // Verifies auth token hash in frame using private certificates in
+  // `visibility_history_`. Returns either kSuccess or kUnable.  This function
+  // never returns kFail.
+  PairedKeyVerificationResult VerifyAuthTokenHashWithPrivateCertificates(
+      const nearby::sharing::service::proto::V1Frame& frame);
+  PairedKeyVerificationResult VerifyPairedKeyEncryptionFrame(
+      const nearby::sharing::service::proto::V1Frame& frame);
+  void ApplyResult(PairedKeyVerificationResult result);
+  // True if visibility has changed recently.
+  bool IsVisibilityRecentlyUpdated() const;
+
+  platform::Clock& clock_;
+  NearbyShareCertificateManager& certificate_manager_;
+  IncomingFramesReader& frames_reader_;
+  const bool share_target_is_incoming_;
+  const location::nearby::proto::sharing::OSType os_type_;
+  const VisibilityHistory visibility_history_;
+  const std::optional<NearbyShareDecryptedPublicCertificate> certificate_;
+  const absl::Duration read_frame_timeout_;
+  std::vector<uint8_t> raw_token_;
+  absl::AnyInvocable<void(const nearby::sharing::service::proto::Frame& frame)>
+      frame_writer_;
+  std::function<void(PairedKeyVerificationResult,
+                     ::location::nearby::proto::sharing::OSType)>
+      callback_;
+  PairedKeyVerificationResult verification_result_;
+};
+
+}  // namespace quickshare::sharing
+
+#endif  // THIRD_PARTY_NEARBY_SHARING_PAIRED_KEY_VERIFICATION_RUNNER_H_

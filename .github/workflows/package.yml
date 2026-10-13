@@ -1,0 +1,180 @@
+name: Package
+
+# Every installable build is defined here. build.yml (manual) and release.yml (a tag)
+# both call this, so a packaging fix is made once.
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Version string baked into artifact names"
+        required: true
+        type: string
+      platforms:
+        description: "all, appimage, arch or flatpak"
+        required: false
+        default: all
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  QT_VERSION: "6.10.3"
+
+jobs:
+  appimage:
+    name: AppImage
+    runs-on: ubuntu-24.04
+    if: inputs.platforms == 'all' || inputs.platforms == 'appimage'
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install native build dependencies
+        timeout-minutes: 10
+        run: |
+          packaging/ci/apt-install.sh \
+            build-essential ninja-build pkg-config git wget ca-certificates \
+            librsvg2-bin zsync file \
+            libgl1-mesa-dev libegl1-mesa-dev \
+            libssl-dev libcurl4-openssl-dev libsystemd-dev libbluetooth-dev zlib1g-dev \
+            libfontconfig1-dev libfreetype6-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libglib2.0-dev \
+            libx11-dev libx11-xcb-dev libxext-dev libxfixes-dev libxi-dev libxrender-dev \
+            libxcb1-dev libxcb-glx0-dev libxcb-keysyms1-dev libxcb-image0-dev libxcb-shm0-dev \
+            libxcb-icccm4-dev libxcb-sync-dev libxcb-xfixes0-dev libxcb-shape0-dev \
+            libxcb-randr0-dev libxcb-render-util0-dev libxcb-xinerama0-dev libxcb-cursor-dev
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: linux
+          target: desktop
+          arch: linux_gcc_64
+          cache: true
+          add-tools-to-path: true
+
+      - name: Cache dependency prefix
+        uses: actions/cache@v4
+        with:
+          path: .deps
+          key: appimage-deps-v1-${{ hashFiles('packaging/appimage/build.sh') }}
+
+      - name: Build AppImage
+        env:
+          VERSION: ${{ inputs.version }}
+        run: packaging/appimage/build.sh
+
+      - name: Upload AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: appimage
+          path: |
+            dist/*.AppImage
+            dist/*.AppImage.zsync
+
+  arch:
+    name: Arch package
+    runs-on: ubuntu-24.04
+    if: inputs.platforms == 'all' || inputs.platforms == 'arch'
+    timeout-minutes: 90
+    container:
+      image: archlinux:base-devel
+    steps:
+      - uses: actions/checkout@v4
+
+      # makepkg refuses to run as root. The builder gets passwordless sudo so
+      # makepkg -s can install the PKGBUILD's own depends.
+      - name: Set up builder user
+        run: |
+          pacman -Sy --noconfirm archlinux-keyring
+          pacman -Su --noconfirm
+          pacman -S --needed --noconfirm git
+          useradd -m builder
+          echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
+          chown -R builder:builder "${GITHUB_WORKSPACE}"
+
+      # The PKGBUILD clones this repo and reads _commit from the environment,
+      # so the package is the commit that triggered the workflow.
+      - name: Build package
+        run: |
+          su builder -c "cd '${GITHUB_WORKSPACE}/packaging/arch' && _commit='${{ github.sha }}' QT_QPA_PLATFORM=offscreen makepkg -s --noconfirm"
+
+      - name: Collect package
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          mkdir -p dist
+          shopt -s nullglob
+          pkgs=()
+          for pkg in packaging/arch/*.pkg.tar.zst; do
+            [[ "$(basename "$pkg")" == *-debug-* ]] && continue
+            pkgs+=("$pkg")
+          done
+          if (( ${#pkgs[@]} != 1 )); then
+            echo "expected one package, found ${#pkgs[@]}"
+            printf '%s\n' "${pkgs[@]}"
+            exit 1
+          fi
+          if [[ "$VERSION" == 0.0.0-* ]]; then
+            cp "${pkgs[0]}" "dist/quickshare-linux-${VERSION}-x86_64.pkg.tar.zst"
+          else
+            cp "${pkgs[0]}" dist/
+          fi
+
+      - name: Upload Arch package
+        uses: actions/upload-artifact@v4
+        with:
+          name: arch
+          path: dist/*.pkg.tar.zst
+
+  flatpak:
+    name: Flatpak bundle
+    runs-on: ubuntu-latest
+    if: inputs.platforms == 'all' || inputs.platforms == 'flatpak'
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install flatpak tooling
+        timeout-minutes: 10
+        run: |
+          packaging/ci/apt-install.sh flatpak flatpak-builder appstream desktop-file-utils
+          flatpak remote-add --if-not-exists --user flathub https://flathub.org/repo/flathub.flatpakrepo
+
+      - name: Lint manifest and metadata
+        run: |
+          appstreamcli validate --no-net packaging/top.suhasdissa.QuickShareLinux.metainfo.xml
+          desktop-file-validate packaging/top.suhasdissa.QuickShareLinux.desktop
+          flatpak-builder --show-manifest packaging/flatpak/top.suhasdissa.QuickShareLinux.yml > /dev/null
+
+      - name: Cache flatpak runtimes
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/flatpak
+          key: flatpak-runtimes-${{ hashFiles('packaging/flatpak/top.suhasdissa.QuickShareLinux.yml') }}
+
+      - name: Build flatpak
+        run: |
+          flatpak-builder --user --force-clean --disable-rofiles-fuse \
+            --install-deps-from=flathub \
+            --repo="${{ runner.temp }}/flatpak-repo" \
+            "${{ runner.temp }}/flatpak-build" \
+            packaging/flatpak/top.suhasdissa.QuickShareLinux.yml
+
+      - name: Export bundle
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          mkdir -p dist
+          flatpak build-bundle "${{ runner.temp }}/flatpak-repo" \
+            "dist/QuickShareLinux-${VERSION}.flatpak" \
+            top.suhasdissa.QuickShareLinux
+
+      - name: Upload Flatpak bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: flatpak
+          path: dist/*.flatpak

@@ -1,0 +1,43 @@
+name: Build
+
+# Manual dry run of the release packages. A tag is public the moment release.yml finishes,
+# so prove a package green here first. Artifacts are the AppImage, Arch package and Flatpak.
+on:
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: "Which package(s) to build"
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - appimage
+          - arch
+          - flatpak
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  meta:
+    name: Compute metadata
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - name: Compute version
+        id: meta
+        run: echo "version=0.0.0-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+  package:
+    name: Package
+    needs: meta
+    uses: ./.github/workflows/package.yml
+    with:
+      version: ${{ needs.meta.outputs.version }}
+      platforms: ${{ inputs.platforms }}

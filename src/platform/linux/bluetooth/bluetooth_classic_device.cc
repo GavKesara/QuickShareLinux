@@ -1,0 +1,182 @@
+// Copyright 2023 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include <memory>
+
+#include <sdbus-c++/IObject.h>
+#include <sdbus-c++/ProxyInterfaces.h>
+
+#include "absl/strings/string_view.h"
+#include "platform/api/bluetooth_utils.h"
+#include "platform/linux/bluetooth/bluetooth_classic_device.h"
+#include "platform/linux/bluetooth/bluez.h"
+#include "platform/linux/bluetooth/bluez_device.h"
+#include "platform/linux/dbus/dbus.h"
+#include "platform/api/logging.h"
+
+namespace quickshare::platform {
+namespace linux {
+BluetoothDevice::BluetoothDevice(std::shared_ptr<bluez::Device> device)
+    : lost_(false), device_(device) {
+  LOG(INFO) << "Created BluetoothDevice for: " << device -> Address();
+  try {
+    last_known_name_ = device->Alias();
+  } catch (const sdbus::Error &e) {
+    DBUS_LOG_PROPERTY_GET_ERROR(device, "Alias", e);
+  }
+  try {
+    MacAddress::FromString(device -> Address(), last_known_address_);
+    unique_id_ = last_known_address_.address();
+  } catch (const sdbus::Error &e) {
+    DBUS_LOG_PROPERTY_GET_ERROR(device, "Address", e);
+  }
+}
+
+std::string BluetoothDevice::GetName() const {
+  auto device = device_;
+  if (device == nullptr) {
+    absl::ReaderMutexLock l(&properties_mutex_);
+    return last_known_name_;
+  }
+
+  try {
+    std::string alias = device->Alias();
+    {
+      absl::MutexLock l(&properties_mutex_);
+      last_known_name_ = alias;
+    }
+    return alias;
+  } catch (const sdbus::Error &e) {
+    DBUS_LOG_PROPERTY_GET_ERROR(device, "Alias", e);
+    return {};
+  }
+}
+
+MacAddress BluetoothDevice::GetMacAddress() const {
+  auto device = device_;
+  if (device == nullptr) {
+    absl::ReaderMutexLock l(&properties_mutex_);
+    MacAddress addr;
+    MacAddress::FromString("00:00:00:00:00:00", addr);
+    return addr;
+  }
+
+  try {
+    std::string addr = device->Address();
+    {
+      absl::MutexLock l(&properties_mutex_);
+      MacAddress::FromString(addr, last_known_address_);
+    }
+    return last_known_address_;
+  } catch (const sdbus::Error &e) {
+    DBUS_LOG_PROPERTY_GET_ERROR(device, "Address", e);
+    MacAddress addr;
+    MacAddress::FromString("00:00:00:00:00:00", addr);
+    return addr;
+  }
+}
+
+std::string BluetoothDevice::GetAddressType() const {
+  auto device = device_;
+  if (device == nullptr) return "public";
+
+  try {
+    return device->AddressType();
+  } catch (const sdbus::Error& e) {
+    DBUS_LOG_PROPERTY_GET_ERROR(device, "AddressType", e);
+    return "public";
+  }
+}
+
+std::optional<int16_t> BluetoothDevice::GetRssi() const {
+  auto device = device_;
+  if (device == nullptr) return std::nullopt;
+
+  try {
+    return device->RSSI();
+  } catch (const sdbus::Error& e) {
+    DBUS_LOG_PROPERTY_GET_ERROR(device, "RSSI", e);
+    return std::nullopt;
+  }
+}
+
+std::optional<int16_t> BluetoothDevice::GetTxPower() const {
+  auto device = device_;
+  if (device == nullptr) return std::nullopt;
+
+  try {
+    return device->TxPower();
+  } catch (const sdbus::Error& e) {
+    DBUS_LOG_PROPERTY_GET_ERROR(device, "TxPower", e);
+    return std::nullopt;
+  }
+}
+
+bool BluetoothDevice::ConnectToProfile(absl::string_view service_uuid) {
+  auto device = device_;
+  if (device == nullptr) return false;
+  try {
+    device->ConnectProfile(std::string(service_uuid));
+    return true;
+  } catch (const sdbus::Error &e) {
+    DBUS_LOG_METHOD_CALL_ERROR(device, "ConnectProfile", e);
+    return false;
+  }
+}
+
+  bool BluetoothDevice::Connect() {
+  auto device = device_;
+  if (device == nullptr) return false;
+  try {
+    device->Connect();
+    return true;
+  } catch (const sdbus::Error &e) {
+    DBUS_LOG_METHOD_CALL_ERROR(device, "Connect", e);
+    return false;
+  }
+}
+  MonitoredBluetoothDevice::MonitoredBluetoothDevice(
+    std::shared_ptr<sdbus::IConnection> system_bus,
+    std::shared_ptr<bluez::Device> device)
+    : BluetoothDevice(device),
+      ProxyInterfaces<sdbus::Properties_proxy>(*system_bus,
+                                               sdbus::ServiceName(bluez::SERVICE_DEST),
+                                               device->getProxy().getObjectPath()),
+      system_bus_(std::move(system_bus)) {
+  registerProxy();
+}
+
+void MonitoredBluetoothDevice::onPropertiesChanged(
+    const sdbus::InterfaceName &interfaceName,
+    const std::map<sdbus::PropertyName, sdbus::Variant> &changedProperties,
+    const std::vector<sdbus::PropertyName> &invalidatedProperties) {
+  if (interfaceName != bluez::DEVICE_INTERFACE) {
+    return;
+  }
+
+  for (auto it = changedProperties.begin(); it != changedProperties.end();
+       it++)
+  {
+    if (it->first == "ServicesResolved"){
+      LOG(INFO) << ": ServicesResolved :" << it->second.get<std::string>();
+    } else if (it->first == bluez::DEVICE_NAME) {
+      auto callback = GetDiscoveryCallback();
+      if (callback != nullptr && callback->device_name_changed_cb != nullptr)
+        callback->device_name_changed_cb(*this);
+    }
+  }
+}
+
+}  // namespace linux
+}  // namespace quickshare::platform

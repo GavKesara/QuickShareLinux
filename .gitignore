@@ -1,0 +1,6 @@
+build/
+build-*/
+.flatpak-builder/
+.deps/
+dist/
+ui/fonts/*.ttf

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=QuickShareLinux
+Comment=Share files with nearby devices
+Exec=quickshare
+Icon=top.suhasdissa.QuickShareLinux
+Categories=Network;FileTransfer;
+Terminal=false
+StartupNotify=true

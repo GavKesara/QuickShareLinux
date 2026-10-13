@@ -1,0 +1,140 @@
+// Copyright 2023 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#ifndef PLATFORM_IMPL_LINUX_BLUETOOTH_DEVICES_H_
+#define PLATFORM_IMPL_LINUX_BLUETOOTH_DEVICES_H_
+
+#include <chrono>
+#include <memory>
+#include <string>
+
+#include <sdbus-c++/AdaptorInterfaces.h>
+#include <sdbus-c++/IConnection.h>
+#include <sdbus-c++/IProxy.h>
+#include <sdbus-c++/ProxyInterfaces.h>
+#include <sdbus-c++/StandardInterfaces.h>
+#include <sdbus-c++/Types.h>
+
+#include "absl/container/flat_hash_map.h"
+#include "absl/synchronization/mutex.h"
+#include "platform/api/bluetooth_utils.h"
+#include "platform/api/implementation/ble.h"
+#include "platform/api/implementation/bluetooth_classic.h"
+#include "platform/linux/bluetooth/bluetooth_classic_device.h"
+
+namespace quickshare::platform {
+namespace linux {
+class BluetoothAdapter;
+
+class BluetoothDevices final {
+ public:
+  BluetoothDevices(
+      std::shared_ptr<sdbus::IConnection> system_bus,
+      sdbus::ObjectPath adapter_object_path)
+      : system_bus_(std::move(system_bus)),
+        adapter_object_path_(std::move(adapter_object_path)) {}
+
+  std::shared_ptr<BluetoothDevice> get_device_by_path(const sdbus::ObjectPath &)
+      ABSL_LOCKS_EXCLUDED(devices_by_path_lock_);
+  std::shared_ptr<BluetoothDevice> get_device_by_address(const MacAddress &);
+  std::shared_ptr<BluetoothDevice> get_device_by_unique_id(
+      api::ble::BlePeripheral::UniqueId id);
+
+  std::shared_ptr<MonitoredBluetoothDevice> add_new_device(sdbus::ObjectPath)
+      ABSL_LOCKS_EXCLUDED(devices_by_path_lock_);
+
+  void remove_device_by_path(const sdbus::ObjectPath &)
+      ABSL_LOCKS_EXCLUDED(devices_by_path_lock_);
+  void mark_peripheral_lost(const sdbus::ObjectPath &)
+      ABSL_LOCKS_EXCLUDED(devices_by_path_lock_);
+  void cleanup_lost_peripherals() ABSL_LOCKS_EXCLUDED(devices_by_path_lock_);
+
+    // DEBUG
+    void dump_devices() ABSL_LOCKS_EXCLUDED(devices_by_path_lock_) {
+      absl::ReaderMutexLock lock(&devices_by_path_lock_);
+      LOG(INFO) << "Dumping BluetoothDevices:";
+      for (const auto& [path, device] : devices_by_path_) {
+        LOG(INFO) << " - Device path: " << path << " , Name: " << device->GetName();
+      }
+    }
+
+
+ private:
+  std::shared_ptr<sdbus::IConnection> system_bus_;
+  sdbus::ObjectPath adapter_object_path_;
+
+  absl::Mutex devices_by_path_lock_;
+  absl::flat_hash_map<std::string, std::shared_ptr<MonitoredBluetoothDevice>>
+      devices_by_path_ ABSL_GUARDED_BY(devices_by_path_lock_);
+  std::chrono::time_point<std::chrono::steady_clock> last_cleanup_
+      ABSL_GUARDED_BY(devices_by_path_lock_);
+};
+
+std::shared_ptr<BluetoothDevices> GetSharedBluetoothDevices(
+    std::shared_ptr<sdbus::IConnection> system_bus,
+    const sdbus::ObjectPath& adapter_object_path);
+
+class DeviceWatcher final : sdbus::ProxyInterfaces<sdbus::ObjectManager_proxy> {
+ public:
+  DeviceWatcher(const DeviceWatcher &) = delete;
+  DeviceWatcher(DeviceWatcher &&) = delete;
+  DeviceWatcher &operator=(const DeviceWatcher &) = delete;
+  DeviceWatcher &operator=(DeviceWatcher &&) = delete;
+
+  DeviceWatcher(
+      sdbus::IConnection &system_bus,
+      const sdbus::ObjectPath &adapter_object_path,
+      BluetoothAdapter &adapter,
+      std::shared_ptr<BluetoothDevices> devices,
+      std::unique_ptr<api::BluetoothClassicMedium::DiscoveryCallback>
+          discovery_callback)
+      : ProxyInterfaces(system_bus, sdbus::ServiceName("org.bluez"),
+                        sdbus::ObjectPath("/")),
+        adapter_object_path_(adapter_object_path),
+        adapter_(adapter),
+        devices_(std::move(devices)),
+        discovery_cb_(std::move(discovery_callback)) {
+    notifyExistingDevices();
+    registerProxy();
+  }
+  DeviceWatcher(sdbus::IConnection &system_bus,
+                const sdbus::ObjectPath &adapter_object_path,
+                BluetoothAdapter &adapter,
+                std::shared_ptr<BluetoothDevices> devices)
+      : DeviceWatcher(system_bus, adapter_object_path, adapter, std::move(devices),
+                      nullptr) {}
+  ~DeviceWatcher() { unregisterProxy(); }
+
+  void onInterfacesAdded(
+      const sdbus::ObjectPath &objectPath,
+      const std::map<sdbus::InterfaceName,
+                     std::map<sdbus::PropertyName, sdbus::Variant>>
+          &interfacesAndProperties) override;
+  void onInterfacesRemoved(const sdbus::ObjectPath &objectPath,
+                           const std::vector<sdbus::InterfaceName> &interfaces)
+      override;
+
+ private:
+  void notifyExistingDevices();
+
+  sdbus::ObjectPath adapter_object_path_;
+  BluetoothAdapter &adapter_;
+  std::shared_ptr<BluetoothDevices> devices_;
+  std::shared_ptr<api::BluetoothClassicMedium::DiscoveryCallback> discovery_cb_;
+};
+
+}  // namespace linux
+}  // namespace quickshare::platform
+
+#endif

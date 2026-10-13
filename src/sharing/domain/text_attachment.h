@@ -1,0 +1,75 @@
+// Copyright 2022 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#ifndef THIRD_PARTY_NEARBY_SHARING_TEXT_ATTACHMENT_H_
+#define THIRD_PARTY_NEARBY_SHARING_TEXT_ATTACHMENT_H_
+
+#include <cstdint>
+#include <optional>
+#include <string>
+
+#include "absl/strings/string_view.h"
+#include "proto/sharing/sharing_enums.pb.h"
+#include "sharing/domain/attachment.h"
+#include "sharing/api/common/nearby_share_enums.h"
+#include "proto/sharing/wire_format.pb.h"
+
+namespace quickshare::sharing {
+
+// Represents a text attachment.
+class TextAttachment : public Attachment {
+ public:
+  using Type = nearby::sharing::service::proto::TextMetadata::Type;
+
+  TextAttachment(
+      Type type, std::string text_body, std::optional<std::string> text_title,
+      std::optional<std::string> mime_type, int32_t batch_id = 0,
+      location::nearby::proto::sharing::AttachmentSourceType source_type =
+          location::nearby::proto::sharing::ATTACHMENT_SOURCE_UNKNOWN);
+  TextAttachment(
+      int64_t id, Type type, std::string text_title, int64_t size,
+      int32_t batch_id = 0,
+      location::nearby::proto::sharing::AttachmentSourceType source_type =
+          location::nearby::proto::sharing::ATTACHMENT_SOURCE_UNKNOWN);
+  TextAttachment(
+      int64_t id, Type type, std::string text_body, std::string text_title,
+      int64_t size, std::string mime_type, int32_t batch_id,
+      location::nearby::proto::sharing::AttachmentSourceType source_type);
+  TextAttachment(const TextAttachment&) = default;
+  TextAttachment(TextAttachment&&) = default;
+  TextAttachment& operator=(TextAttachment&&) = delete;
+  ~TextAttachment() override = default;
+
+  absl::string_view text_body() const { return text_body_; }
+  absl::string_view text_title() const { return text_title_; }
+  Type type() const { return type_; }
+
+  // Attachment:
+  absl::string_view GetDescription() const override;
+  ShareType GetShareType() const override;
+
+  void set_text_body(std::string text_body);
+
+  std::string mime_type() const { return mime_type_; }
+
+ private:
+  const Type type_;
+  std::string text_title_;
+  const std::string mime_type_;
+  std::string text_body_;
+};
+
+}  // namespace quickshare::sharing
+
+#endif  // THIRD_PARTY_NEARBY_SHARING_TEXT_ATTACHMENT_H_

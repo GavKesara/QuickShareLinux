@@ -1,0 +1,260 @@
+// Copyright 2023 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include <algorithm>
+#include <chrono>
+#include <functional>
+#include <optional>
+#include <string>
+
+#include <sdbus-c++/Types.h>
+
+#include "absl/container/flat_hash_map.h"
+#include "absl/strings/substitute.h"
+#include "absl/synchronization/mutex.h"
+#include "platform/linux/bluetooth/bluetooth_adapter.h"
+#include "platform/linux/bluetooth/bluetooth_classic_device.h"
+#include "platform/linux/bluetooth/bluetooth_devices.h"
+#include "platform/linux/bluetooth/bluez.h"
+#include "platform/linux/dbus/dbus.h"
+#include "platform/linux/dbus/generated/bluez/device_client.h"
+#include "platform/api/logging.h"
+
+namespace quickshare::platform {
+namespace linux {
+static constexpr std::chrono::minutes kLostPeripheralsCleanupMinFreq(5);
+absl::Mutex g_shared_devices_lock;
+absl::flat_hash_map<std::string, std::weak_ptr<BluetoothDevices>>
+    g_shared_devices ABSL_GUARDED_BY(g_shared_devices_lock);
+
+std::shared_ptr<BluetoothDevices> GetSharedBluetoothDevices(
+    std::shared_ptr<sdbus::IConnection> system_bus,
+    const sdbus::ObjectPath& adapter_object_path) {
+  const std::string key = adapter_object_path;
+  absl::MutexLock lock(&g_shared_devices_lock);
+  auto it = g_shared_devices.find(key);
+  if (it != g_shared_devices.end()) {
+    if (auto existing = it->second.lock()) {
+      return existing;
+    }
+  }
+  auto devices = std::make_shared<BluetoothDevices>(
+      std::move(system_bus), adapter_object_path);
+  g_shared_devices[key] = devices;
+  return devices;
+}
+
+std::shared_ptr<BluetoothDevice> BluetoothDevices::get_device_by_path(
+    const sdbus::ObjectPath &device_object_path) {
+  absl::ReaderMutexLock l(&devices_by_path_lock_);
+
+  if (devices_by_path_.count(device_object_path) == 0) {
+    return nullptr;
+  }
+
+  return devices_by_path_[device_object_path];
+}
+std::shared_ptr<BluetoothDevice> BluetoothDevices::get_device_by_unique_id(
+  api::ble::BlePeripheral::UniqueId id)
+{
+  // converting from stoull to mac again
+  id &= 0x0000FFFFFFFFFFFFULL; // keep 48 bits
+  std::ostringstream oss;
+  oss << std::hex << std::setfill('0') << std::setw(12) << id;
+  std::string hex = oss.str(); // e.g. "aabbccddeeff"
+
+  MacAddress addr;
+  {
+    std::string mac;
+    for (int i = 0; i < 6; ++i) {
+      if (i) mac.push_back(':');
+      mac.append(hex.substr(i * 2, 2));
+    }
+    MacAddress::FromString(mac, addr);
+  }
+
+  return get_device_by_address(addr);
+}
+std::shared_ptr<BluetoothDevice> BluetoothDevices::get_device_by_address(
+    const MacAddress &addr) {
+  auto device_object_path =
+      bluez::device_object_path(adapter_object_path_, addr.ToString());
+  return get_device_by_path(sdbus::ObjectPath(device_object_path));
+}
+
+void BluetoothDevices::remove_device_by_path(
+    const sdbus::ObjectPath &device_object_path) {
+  absl::MutexLock l(&devices_by_path_lock_);
+
+  devices_by_path_.erase(device_object_path);
+}
+
+void BluetoothDevices::mark_peripheral_lost(
+    const sdbus::ObjectPath &device_object_path) {
+  absl::ReaderMutexLock lock(&devices_by_path_lock_);
+  if (devices_by_path_.count(device_object_path) == 0) {
+    LOG(ERROR) << __func__ << ": Device " << device_object_path
+                       << " doesn't exist";
+    return;
+  }
+  devices_by_path_[device_object_path]->MarkLost();
+}
+
+void BluetoothDevices::cleanup_lost_peripherals() {
+  auto now = std::chrono::steady_clock::now();
+  absl::MutexLock lock(&devices_by_path_lock_);
+  if ((now - last_cleanup_) < kLostPeripheralsCleanupMinFreq) {
+    return;
+  }
+  last_cleanup_ = now;
+
+  for (auto it = devices_by_path_.begin(), end = devices_by_path_.end();
+       it != end;) {
+    auto copy = it++;
+    if (copy->second->Lost()) devices_by_path_.erase(copy);
+  }
+}
+
+std::shared_ptr<MonitoredBluetoothDevice> BluetoothDevices::add_new_device(
+    sdbus::ObjectPath device_object_path) {
+  absl::MutexLock l(&devices_by_path_lock_);
+  auto [device_it, inserted] = devices_by_path_.emplace(
+      std::string(device_object_path),
+      std::make_shared<MonitoredBluetoothDevice>(
+          system_bus_,
+          std::make_shared<bluez::Device>(system_bus_, device_object_path)));
+  if (!inserted) device_it->second->UnmarkLost();
+  return device_it->second;
+}
+
+void DeviceWatcher::onInterfacesAdded(
+    const sdbus::ObjectPath &objectPath,
+    const std::map<sdbus::InterfaceName,
+                   std::map<sdbus::PropertyName, sdbus::Variant>>
+        &interfacesAndProperties) {
+  auto path_prefix = absl::Substitute("$0/dev_", adapter_object_path_);
+  if (objectPath.find(path_prefix) != 0) {
+    return;
+  }
+
+  if (interfacesAndProperties.count(sdbus::InterfaceName(org::bluez::Device1_proxy::INTERFACE_NAME)) ==
+      0)
+    return;
+
+  auto device = devices_->add_new_device(objectPath);
+  device->SetDiscoveryCallback(discovery_cb_);
+  if (discovery_cb_ != nullptr &&
+      discovery_cb_->device_discovered_cb != nullptr) {
+    discovery_cb_->device_discovered_cb(*device);
+  }
+
+}
+
+void DeviceWatcher::onInterfacesRemoved(
+    const sdbus::ObjectPath &objectPath,
+    const std::vector<sdbus::InterfaceName> &interfaces) {
+  auto path_prefix = absl::Substitute("$0/dev_", adapter_object_path_);
+  if (objectPath.find(path_prefix) != 0) {
+    return;
+  }
+
+  auto removed_device_it = std::find(interfaces.begin(), interfaces.end(),
+                                     org::bluez::Device1_proxy::INTERFACE_NAME);
+  if (removed_device_it != interfaces.end()) {
+    auto device = devices_->get_device_by_path(objectPath);
+    if (device == nullptr) {
+      LOG(WARNING) << __func__
+                           << ": received InterfacesRemoved for a device "
+                              "we don't know about: "
+                           << objectPath;
+      return;
+    }
+
+    LOG(INFO) << __func__ << ": Device " << objectPath
+                      << " has been removed";
+    if (discovery_cb_ != nullptr && discovery_cb_->device_lost_cb != nullptr) {
+      discovery_cb_->device_lost_cb(*device);
+    }
+
+    if (discovery_cb_ != nullptr) {
+      devices_->remove_device_by_path(objectPath);
+    } else {
+      devices_->mark_peripheral_lost(objectPath);
+    }
+  }
+}
+
+void DeviceWatcher::notifyExistingDevices() {
+  std::map<sdbus::ObjectPath,
+           std::map<sdbus::InterfaceName, std::map<sdbus::PropertyName, sdbus::Variant>>>
+      objects;
+  try {
+    objects = GetManagedObjects();
+  } catch (const sdbus::Error &e) {
+    DBUS_LOG_METHOD_CALL_ERROR(this, "GetManagedObjects", e);
+    return;
+  }
+
+  std::vector<sdbus::ObjectPath> existing_device_paths;
+
+  for (const auto& [device_path, interfaces] : objects) {
+    if (device_path.find(absl::Substitute("$0/dev_", adapter_object_path_)) == 0 &&
+        interfaces.count(sdbus::InterfaceName(org::bluez::Device1_proxy::INTERFACE_NAME)) == 1) {
+      
+      // Don't remove bonded, paired, connected, or trusted devices
+      bool should_skip = false;
+      auto device_interface_it = interfaces.find(sdbus::InterfaceName(org::bluez::Device1_proxy::INTERFACE_NAME));
+      if (device_interface_it != interfaces.end()) {
+        const auto& properties = device_interface_it->second;
+        
+        auto check_bool_property = [&properties](const sdbus::PropertyName& prop_name) -> bool {
+          auto it = properties.find(prop_name);
+          if (it != properties.end()) {
+            try {
+              return it->second.get<bool>();
+            } catch (...) {
+              return false;
+            }
+          }
+          return false;
+        };
+        
+        if (check_bool_property(sdbus::PropertyName("Bonded")) || 
+            check_bool_property(sdbus::PropertyName("Paired")) ||
+            check_bool_property(sdbus::PropertyName("Connected")) ||
+            check_bool_property(sdbus::PropertyName("Trusted"))) {
+          should_skip = true;
+          LOG(INFO) << __func__ << ": Skipping device " << device_path 
+                    << " (bonded/paired/connected/trusted)";
+        }
+      }
+      
+      if (!should_skip) {
+        existing_device_paths.push_back(device_path);
+      }
+    }
+  }
+
+  // Remove existing devices - they will be immediately re-discovered
+  // This triggers InterfacesAdded signals which properly invoke discovery callbacks
+  for (const auto& device_path : existing_device_paths) {
+    LOG(INFO) << __func__ << ": Refreshing existing device " << device_path;
+    if (!adapter_.RemoveDeviceByObjectPath(device_path)) {
+      LOG(WARNING) << __func__ << ": Failed to remove device " << device_path;
+    }
+  }
+}
+
+}  // namespace linux
+}  // namespace quickshare::platform

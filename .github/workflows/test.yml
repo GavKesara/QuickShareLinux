@@ -1,0 +1,76 @@
+name: Test
+
+# CTest on every push and pull request. Packaging runs only from a manual build or a
+# release tag, so this is what catches a broken commit before either of those.
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: CTest
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    container:
+      image: archlinux:base-devel
+    steps:
+      - uses: actions/checkout@v4
+
+      # Arch is the distro whose packages match what the project actually links: Qt 6.10,
+      # a new enough Abseil, protobuf, and sdbus-c++. Ubuntu's archives are behind that.
+      - name: Install dependencies
+        run: |
+          pacman -Sy --noconfirm archlinux-keyring
+          pacman -Su --noconfirm
+          pacman -S --needed --noconfirm \
+            cmake ninja git pkgconf ccache \
+            qt6-base qt6-declarative qt6-svg qt6-wayland \
+            abseil-cpp protobuf openssl sdbus-cpp \
+            bluez-libs systemd-libs curl nlohmann-json gtest
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: /root/.cache/ccache
+          key: ccache-test-${{ github.sha }}
+          restore-keys: ccache-test-
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+
+      - name: Build
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: cmake --build build --parallel
+
+      - name: Test
+        id: test
+        run: |
+          QT_QPA_PLATFORM=offscreen ctest --test-dir build --output-on-failure \
+            --output-log ctest.log --output-junit build/ctest-junit.xml
+
+      - name: Summarize test failures
+        if: failure() && steps.test.outcome == 'failure'
+        run: |
+          {
+            echo "### Failed tests"
+            echo '```'
+            sed -n '/^The following tests FAILED:/,/^Errors while running CTest/p' ctest.log \
+              | grep -v '^Errors while running CTest' || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: ccache statistics
+        if: always()
+        run: ccache --show-stats

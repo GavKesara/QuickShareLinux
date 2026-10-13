@@ -1,0 +1,146 @@
+// Copyright 2023 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#ifndef PLATFORM_IMPL_LINUX_WIFI_MEDIUM_H_
+#define PLATFORM_IMPL_LINUX_WIFI_MEDIUM_H_
+
+#include <atomic>
+#include <functional>
+#include <list>
+#include <memory>
+#include <optional>
+#include <ostream>
+
+#include <sdbus-c++/IConnection.h>
+#include <sdbus-c++/ProxyInterfaces.h>
+#include <sdbus-c++/StandardInterfaces.h>
+#include <sdbus-c++/Types.h>
+
+#include "absl/synchronization/mutex.h"
+#include "absl/container/flat_hash_map.h"
+#include "platform/linux/dbus/generated/networkmanager/device_wireless_client.h"
+#include "platform/linux/wifi/network_manager.h"
+#include "platform/linux/wifi/network_manager_access_point.h"
+#include "platform/linux/wifi/network_manager_active_connection.h"
+#include "platform/api/implementation/wifi.h"
+
+namespace quickshare::platform {
+namespace linux {
+class NetworkManagerWifiMedium
+    : public api::WifiMedium,
+      public sdbus::ProxyInterfaces<
+          org::freedesktop::NetworkManager::Device::Wireless_proxy,
+          sdbus::Properties_proxy> {
+
+ public:
+
+    // Possible authentication types for a WiFi network.
+    enum class WifiAuthType {
+        // WiFi Authentication type; either none (non-secured a.k.a. open) link, or
+        // WPA PSK (WiFi Protected Access PreShared Key), or
+        //   see https://en.wikipedia.org/wiki/Wi-Fi_Protected_Access
+        // WEP (Wired Equivalent Privacy);
+        //   see https://en.wikipedia.org/wiki/Wired_Equivalent_Privacy
+        kUnknown = 0,
+        kOpen = 1,
+        kWpaPsk = 2,
+        kWep = 3,
+      };
+
+    // Possible statuses of a device's connection to a WiFi network.
+    enum class WifiConnectionStatus {
+        kUnknown = 0,
+        kConnected = 1,
+        kConnectionFailure = 2,
+        kAuthFailure = 3,
+      };
+    NetworkManagerWifiMedium(const NetworkManagerWifiMedium &) = delete;
+  NetworkManagerWifiMedium(NetworkManagerWifiMedium &&) = delete;
+  NetworkManagerWifiMedium &operator=(const NetworkManagerWifiMedium &) =
+      delete;
+  NetworkManagerWifiMedium &operator=(NetworkManagerWifiMedium &&) = delete;
+  NetworkManagerWifiMedium(
+      std::shared_ptr<networkmanager::NetworkManager> network_manager,
+      const sdbus::ObjectPath &wireless_device_object_path)
+      : ProxyInterfaces(*network_manager->GetConnection(),
+                        sdbus::ServiceName("org.freedesktop.NetworkManager"),
+                        wireless_device_object_path),
+        system_bus_(network_manager->GetConnection()),
+        network_manager_(std::move(network_manager)),
+        last_scan_(-1) {
+    registerProxy();
+  }
+
+  ~NetworkManagerWifiMedium() override { unregisterProxy(); }
+
+
+  bool IsInterfaceValid() const override { return true; };
+  api::WifiCapability &GetCapability() override;
+  api::WifiInformation &GetInformation() override;
+
+  std::shared_ptr<NetworkManagerAccessPoint> SearchBySSID(
+      absl::string_view ssid, absl::Duration scan_timeout = absl::Seconds(15))
+      ABSL_LOCKS_EXCLUDED(known_access_points_lock_);
+
+  WifiConnectionStatus ConnectToNetwork(
+      absl::string_view ssid, absl::string_view password,
+      WifiAuthType auth_type);
+
+  std::unique_ptr<networkmanager::ActiveConnection> GetActiveConnection();
+
+ protected:
+  void onPropertiesChanged(
+      const sdbus::InterfaceName &interfaceName,
+      const std::map<sdbus::PropertyName, sdbus::Variant> &changedProperties,
+      const std::vector<sdbus::PropertyName> &invalidatedProperties) override;
+
+  void onAccessPointAdded(const sdbus::ObjectPath &access_point) override
+      ABSL_LOCKS_EXCLUDED(known_access_points_lock_) {
+    absl::MutexLock l(&known_access_points_lock_);
+    known_access_points_.erase(access_point);
+    known_access_points_.emplace(access_point,
+                                 std::make_shared<NetworkManagerAccessPoint>(
+                                     getProxy().getConnection(), access_point));
+  }
+  void onAccessPointRemoved(const sdbus::ObjectPath &access_point) override
+      ABSL_LOCKS_EXCLUDED(known_access_points_lock_) {
+    absl::MutexLock l(&known_access_points_lock_);
+    known_access_points_.erase(access_point);
+  }
+
+ private:
+  std::shared_ptr<NetworkManagerAccessPoint> SearchBySSIDNoScan(
+      std::vector<std::uint8_t> &ssid)
+      ABSL_LOCKS_EXCLUDED(known_access_points_lock_);
+
+  std::shared_ptr<sdbus::IConnection> system_bus_;
+  std::shared_ptr<networkmanager::NetworkManager> network_manager_;
+
+  api::WifiCapability capability_;
+  api::WifiInformation information_{false};
+
+  absl::Mutex known_access_points_lock_;
+  absl::flat_hash_map<sdbus::ObjectPath,
+                      std::shared_ptr<NetworkManagerAccessPoint>>
+      known_access_points_ ABSL_GUARDED_BY(known_access_points_lock_);
+
+
+  absl::Mutex last_scan_lock_;
+  std::int64_t last_scan_ ABSL_GUARDED_BY(last_scan_lock_);
+};
+
+}  // namespace linux
+}  // namespace quickshare::platform
+
+#endif

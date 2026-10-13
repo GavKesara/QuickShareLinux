@@ -1,0 +1,195 @@
+// Copyright 2023 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#ifndef PLATFORM_IMPL_LINUX_API_BLE_V2_MEDIUM_H_
+#define PLATFORM_IMPL_LINUX_API_BLE_V2_MEDIUM_H_
+
+#include <memory>
+#include <optional>
+#include <string>
+#include <vector>
+
+#include "absl/base/thread_annotations.h"
+#include "absl/synchronization/notification.h"
+#include <sdbus-c++/IConnection.h>
+
+#include "absl/base/attributes.h"
+#include "absl/container/flat_hash_map.h"
+#include "absl/synchronization/mutex.h"
+#include "platform/api/implementation/ble.h"
+// #include "internal/platform/implementation/linux/ble_gatt_client.h"
+#include "platform/linux/ble/ble_gatt_client.h"
+#include "platform/linux/ble/bluez_gatt_manager.h"
+#include "platform/linux/ble/ble_v2_server_socket.h"
+#include "platform/linux/bluetooth/bluetooth_adapter.h"
+#include "platform/linux/bluetooth/bluetooth_devices.h"
+#include "platform/linux/ble/bluez_advertisement_monitor.h"
+#include "platform/linux/ble/bluez_advertisement_monitor_manager.h"
+#include "platform/linux/ble/bluez_le_advertisement.h"
+#include "platform/linux/dbus/dbus.h"
+#include "platform/api/uuid.h"
+
+namespace quickshare::platform {
+namespace linux {
+class BleV2Medium final : public api::ble::BleMedium {
+ public:
+  BleV2Medium(const BleV2Medium &) = delete;
+  BleV2Medium(BleV2Medium &&) = delete;
+  BleV2Medium &operator=(const BleV2Medium &) = delete;
+  BleV2Medium &operator=(BleV2Medium &&) = delete;
+
+  explicit BleV2Medium(BluetoothAdapter &adapter);
+  ~BleV2Medium() override;
+
+  bool StartAdvertising(
+      const api::ble::BleAdvertisementData &advertising_data,
+      api::ble::AdvertiseParameters advertise_set_parameters) override
+      ABSL_LOCKS_EXCLUDED(cur_adv_mutex_);
+  std::unique_ptr<AdvertisingSession> StartAdvertising(
+      const api::ble::BleAdvertisementData &advertising_data,
+      api::ble::AdvertiseParameters advertise_set_parameters,
+      AdvertisingCallback callback) ABSL_LOCKS_EXCLUDED(advs_mutex_) override;
+  bool StopAdvertising() override ABSL_LOCKS_EXCLUDED(advs_mutex_);
+
+  bool StartScanning(const Uuid &service_uuid,
+                     api::ble::TxPowerLevel tx_power_level,
+                     ScanCallback callback) override
+      ABSL_LOCKS_EXCLUDED(active_adv_monitors_mutex_);
+  bool StopScanning() override ABSL_LOCKS_EXCLUDED(active_adv_monitors_mutex_);
+
+  std::unique_ptr<ScanningSession> StartScanning(
+      const Uuid &service_uuid, api::ble::TxPowerLevel tx_power_level,
+      ScanningCallback callback) override;
+
+  std::unique_ptr<api::ble::GattServer> StartGattServer(
+      api::ble::ServerGattConnectionCallback callback) override;
+
+  std::unique_ptr<api::ble::GattClient> ConnectToGattServer(
+      api::ble::BlePeripheral::UniqueId peripheral_id,
+      api::ble::TxPowerLevel tx_power_level,
+      api::ble::ClientGattConnectionCallback callback) override;
+
+  std::unique_ptr<api::ble::BleServerSocket> OpenServerSocket(
+      const std::string &service_id) override;
+
+  std::unique_ptr<api::ble::BleL2capServerSocket> OpenL2capServerSocket(
+      const std::string &service_id) override;
+
+  std::unique_ptr<api::ble::BleSocket> Connect(
+      const std::string &service_id, api::ble::TxPowerLevel tx_power_level,
+      api::ble::BlePeripheral::UniqueId peripheral_id,
+      CancellationFlag *cancellation_flag) override;
+
+  std::unique_ptr<api::ble::BleL2capSocket> ConnectOverL2cap(
+      int psm, const std::string &service_id,
+      api::ble::TxPowerLevel tx_power_level,
+      api::ble::BlePeripheral::UniqueId peripheral_id,
+      CancellationFlag *cancellation_flag) override;
+
+  bool StartMultipleServicesScanning(const std::vector<Uuid> &service_uuids,
+                                     api::ble::TxPowerLevel tx_power_level,
+                                     ScanCallback callback) override;
+
+  bool PauseMediumScanning() override;
+
+  bool ResumeMediumScanning() override;
+
+  bool IsExtendedAdvertisementsAvailable() override;
+
+  void AddAlternateUuidForService(uint16_t uuid,
+                                  const std::string &service_id) override;
+
+  std::optional<api::ble::BlePeripheral::UniqueId>
+  RetrieveBlePeripheralIdFromNativeId(
+      const std::string &ble_peripheral_native_id) override;
+
+  // bool GetRemotePeripheral(const std::string &mac_address,
+  //                          GetRemotePeripheralCallback callback) override;
+  // bool GetRemotePeripheral(api::ble::BlePeripheral::UniqueId id,
+  //                          GetRemotePeripheralCallback callback) override;
+
+ private:
+  struct ServiceDataDiscovery;
+
+  bool StartLEDiscovery();
+  bool WaitForAdvertisementMonitorManager();
+  void OnRegisterMonitorReply(std::optional<sdbus::Error> error);
+  bool StartFallbackScan(const Uuid& service_uuid,
+                         api::ble::BleMedium::ScanningCallback callback);
+  void StopFallbackScan(const Uuid& service_uuid);
+
+  bool MonitorManagerSupportsOr() {
+    std::vector<std::string> supported_types;
+    try {
+      supported_types = adv_monitor_manager_->SupportedMonitorTypes();
+    } catch (const sdbus::Error &e) {
+      DBUS_LOG_PROPERTY_GET_ERROR(adv_monitor_manager_, "SupportedMonitorTypes",
+                                  e);
+      return false;
+    }
+
+    auto is_supported_type = [](std::string pattern) {
+      return pattern == "or_patterns";
+    };
+
+    auto end = supported_types.cend();
+    return std::find_if(supported_types.cbegin(), end, is_supported_type) !=
+           end;
+  }
+
+  std::shared_ptr<ServiceDataDiscovery> service_data_discovery_;
+
+  std::shared_ptr<sdbus::IConnection> system_bus_;
+  BluetoothAdapter adapter_;
+  std::shared_ptr<BluetoothDevices> devices_;
+  std::shared_ptr<BluezGattDiscovery> gatt_discovery_;
+
+  std::unique_ptr<RootObjectManager> root_object_manager_;
+  std::unique_ptr<bluez::AdvertisementMonitorManager> adv_monitor_manager_;
+  absl::Notification adv_monitor_manager_ready_notification_;
+  absl::Mutex adv_monitor_manager_ready_mutex_;
+  bool adv_monitor_manager_ready_ ABSL_GUARDED_BY(adv_monitor_manager_ready_mutex_) =
+      false;
+  std::string adv_monitor_manager_error_name_
+      ABSL_GUARDED_BY(adv_monitor_manager_ready_mutex_);
+  std::string adv_monitor_manager_error_message_
+      ABSL_GUARDED_BY(adv_monitor_manager_ready_mutex_);
+  absl::Mutex active_adv_monitors_mutex_;
+  absl::flat_hash_map<
+      Uuid,
+      std::pair<std::unique_ptr<bluez::AdvertisementMonitor>, std::unique_ptr<DeviceWatcher>>>
+      active_adv_monitors_ ABSL_GUARDED_BY(active_adv_monitors_mutex_);
+  // Used by the synchronous variant of StartScanning
+  std::optional<Uuid> cur_monitored_service_uuid_;
+
+  std::unique_ptr<bluez::LEAdvertisementManager> adv_manager_;
+
+    int psm_;
+
+  absl::Mutex cur_adv_mutex_;
+  std::unique_ptr<bluez::LEAdvertisement> cur_adv_
+      ABSL_GUARDED_BY(cur_adv_mutex_);
+
+  absl::Mutex advs_mutex_;
+  bool extended_adv_registered_ ABSL_GUARDED_BY(advs_mutex_) = false;
+  bool adv_capabilities_read_ ABSL_GUARDED_BY(advs_mutex_) = false;
+  std::optional<int16_t> adv_min_tx_power_ ABSL_GUARDED_BY(advs_mutex_);
+  std::optional<int16_t> adv_max_tx_power_ ABSL_GUARDED_BY(advs_mutex_);
+  std::list<std::unique_ptr<bluez::LEAdvertisement>> advs_
+      ABSL_GUARDED_BY(advs_mutex_);
+};
+}  // namespace linux
+}  // namespace quickshare::platform
+
+#endif
