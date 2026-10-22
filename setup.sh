@@ -67,8 +67,8 @@ case "${ID:-}" in
             bluez
         ;;
 
-    arch)
-        install_packages pacman -Syu --needed --noconfirm \
+    arch|cachyos)
+        install_packages pacman -Syu --needed \
             base-devel \
             cmake \
             ninja \
